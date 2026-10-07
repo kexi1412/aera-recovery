@@ -3,7 +3,7 @@ name: Build AERA Recovery (astonc)
 on:
   workflow_dispatch:
   push:
-    branches: [aera-16.0]
+    branches: [main, aera-16.0]
     paths-ignore:
       - 'README.md'
       - '*.md'
