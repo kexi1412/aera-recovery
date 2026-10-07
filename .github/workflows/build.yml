@@ -89,6 +89,23 @@ jobs:
           rm -rf device/oneplus/astonc/.github device/oneplus/astonc/.git
           ls device/oneplus/astonc
 
+      - name: Apply upstream source fixes
+        run: |
+          cd "$GITHUB_WORKSPACE/aera"
+          # AERA's partitionmanager.cpp references AID_MEDIA_RW without
+          # including the header that declares it (data.cpp and
+          # twrp-functions.cpp, which use the same symbol, both include it).
+          # Reported by run #2 (37608320847): "use of undeclared identifier
+          # 'AID_MEDIA_RW'" at partitionmanager.cpp:1632 and :5401.
+          f=bootable/recovery/partitionmanager.cpp
+          if ! grep -q 'android_filesystem_config.h' "$f"; then
+            sed -i '0,/^#include <fstab\/fstab.h>/s//#include <private\/android_filesystem_config.h>\n#include <fstab\/fstab.h>/' "$f"
+            echo "patched $f:"
+            grep -n 'android_filesystem_config.h' "$f"
+          else
+            echo "$f already includes android_filesystem_config.h"
+          fi
+
       - name: Build recovery
         run: |
           cd "$GITHUB_WORKSPACE/aera"
