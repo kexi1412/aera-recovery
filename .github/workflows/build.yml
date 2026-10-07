@@ -8,6 +8,9 @@ on:
       - 'README.md'
       - '*.md'
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-22.04
@@ -35,51 +38,47 @@ jobs:
             lib32z1-dev libelf-dev liblz4-tool libncurses5 libncurses5-dev \
             libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush \
             python3 python3-pip rsync schedtool squashfs-tools xsltproc \
-            zip zlib1g-dev openjdk-11-jdk repo
+            zip zlib1g-dev openjdk-11-jdk
           git lfs install --skip-repo || true
           echo "ccache: $(ccache --version | head -1)"
 
+      - name: Install repo tool
+        run: |
+          mkdir -p "$HOME/bin"
+          curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo \
+            -o "$HOME/bin/repo"
+          chmod +x "$HOME/bin/repo"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+
       - name: Configure git and ccache
         run: |
-          git config --global user.name "${{ github.actor }}"
-          git config --global user.email "${{ github.actor }}@users.noreply.github.com"
+          git config --global user.name "github-actions"
+          git config --global user.email "github-actions@github.com"
           git config --global color.ui false
           # The AERA manifest declares the AERA remote over SSH
           # (ssh://git@github.com/AERA-Recovery). The repositories are public,
-          # so rewrite to HTTPS when no deploy key is provided.
-          if [ -z "${{ secrets.AERA_SSH_KEY }}" ]; then
-            git config --global url."https://github.com/AERA-Recovery".insteadOf "ssh://git@github.com/AERA-Recovery"
-          fi
+          # so rewrite to HTTPS.
+          git config --global url."https://github.com/AERA-Recovery".insteadOf "ssh://git@github.com/AERA-Recovery"
           ccache -M 30G
           ccache -z
 
       - name: Add swap
         run: |
+          sudo swapoff /swapfile 2>/dev/null || true
+          sudo rm -f /swapfile
           sudo fallocate -l 16G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=16384
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
           free -h
 
-      - name: Set up SSH for AERA repositories
-        if: ${{ secrets.AERA_SSH_KEY != '' }}
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.AERA_SSH_KEY }}
-
-      - name: Repo init (AERA manifest, aera-16.0)
+      - name: Repo init and sync (AERA manifest, aera-16.0)
         run: |
           mkdir -p "$GITHUB_WORKSPACE/aera"
           cd "$GITHUB_WORKSPACE/aera"
-          # AERA repositories are public; HTTPS works without a key. The SSH
-          # branch is kept for future private access.
-          if [ -n "${{ secrets.AERA_SSH_KEY }}" ]; then
-            REPO_URL="git@github.com:AERA-Recovery/android_manifest.git"
-          else
-            REPO_URL="https://github.com/AERA-Recovery/android_manifest.git"
-          fi
-          repo init -u "$REPO_URL" -b aera-16.0 --git-lfs --depth=1
-          repo sync -c --force-sync --no-clone-bundle --no-tags -j$(nproc --all)
+          repo init -u https://github.com/AERA-Recovery/android_manifest.git \
+            -b aera-16.0 --git-lfs --depth=1
+          repo sync -c --force-sync --no-clone-bundle --no-tags -j"$(nproc --all)"
 
       - name: Install device tree
         run: |
@@ -98,7 +97,7 @@ jobs:
           source device/oneplus/astonc/vendorsetup.sh
           source build/envsetup.sh
           lunch twrp_astonc-bp2a-eng
-          mka adbd recoveryimage -j$(nproc --all) || mka adbd recoveryimage
+          mka adbd recoveryimage -j"$(nproc --all)" || mka adbd recoveryimage
 
       - name: Show ccache stats
         if: always()
