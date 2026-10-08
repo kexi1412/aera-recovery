@@ -32,6 +32,18 @@ BOARD_RECOVERY_IMAGE_PREPARE += mkdir -p $(addprefix $(TARGET_RECOVERY_ROOT_OUT)
 # AERA_OVERRIDE_SYSTEM_PROPS can run. Only rewrite the recovery property file;
 # compiled SDK/API and boot/AVB version metadata remain the pinned AOSP values.
 BOARD_RECOVERY_IMAGE_PREPARE += && python3 $(DEVICE_PATH)/scripts/prepare-crypto-properties.py $(TARGET_RECOVERY_ROOT_OUT)/prop.default $(DEVICE_PATH)/config/crypto-version-inputs.json
+# AERA recovery resolves almost every config path through /etc (recovery.fstab,
+# twrp.flags, twrp.fstab, task_profiles.json, cgroups.json, ...), and its
+# init.rc does `symlink /system/etc /etc` at runtime. That symlink fails if /etc
+# already exists as a real directory in the ramdisk, which is what happens on
+# this tree: the AERA build script `mkdir -p $RAMDISK/etc` runs before the
+# device-tree copy, so a bare /etc/ (holding only aera.cfg) ends up in the
+# cpio. Boot logs confirm the fallout: `init: failed to read
+# '/etc/recovery.fstab'` and logd crash-looping on missing
+# /etc/task_profiles.json. Make /etc a real symlink to /system/etc in the final
+# ramdisk, relocating the few files the script left there. Runs last, after the
+# AERA script and the device-tree copy.
+BOARD_RECOVERY_IMAGE_PREPARE += && if [ ! -L $(TARGET_RECOVERY_ROOT_OUT)/etc ]; then cp -af $(TARGET_RECOVERY_ROOT_OUT)/etc/. $(TARGET_RECOVERY_ROOT_OUT)/system/etc/ 2>/dev/null; rm -rf $(TARGET_RECOVERY_ROOT_OUT)/etc; ln -s /system/etc $(TARGET_RECOVERY_ROOT_OUT)/etc; fi
 
 TARGET_USERIMAGES_USE_EXT4 := true
 TARGET_USERIMAGES_USE_F2FS := true
