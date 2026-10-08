@@ -22,6 +22,27 @@ jobs:
         with:
           path: device_tree
 
+      - name: Set up vendor-blobs deploy key
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.BLOBS_DEPLOY_KEY }}
+
+      - name: Fetch vendor crypto blobs
+        run: |
+          # Proprietary QTI security ELFs (qseecomd, keymint, gatekeeper and
+          # their lib closure) required for FBE decryption. They are OEM
+          # binaries, so they live in the private astonc-vendor-blobs repo and
+          # are injected here at build time. The device tree .gitignore keeps
+          # recovery/root/vendor/bin and vendor/lib64 out of this public repo.
+          git clone --depth 1 \
+            git@github.com:kexi1412/astonc-vendor-blobs.git \
+            "$RUNNER_TEMP/blobs"
+          mkdir -p device_tree/recovery/root/vendor
+          cp -a "$RUNNER_TEMP/blobs/vendor/." device_tree/recovery/root/vendor/
+          echo "vendor/bin:"; ls device_tree/recovery/root/vendor/bin
+          echo "vendor/bin/hw:"; ls device_tree/recovery/root/vendor/bin/hw
+          echo "vendor/lib64 count: $(ls device_tree/recovery/root/vendor/lib64 | wc -l)"
+
       - name: Free disk space
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android/sdk/ndk \
