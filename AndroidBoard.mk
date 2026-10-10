@@ -6,4 +6,5 @@ LOCAL_PATH := $(call my-dir)
 # properties after the measured target configuration or helper changes.
 $(call intermediates-dir-for,PACKAGING,recovery)/ramdisk_files-timestamp: \
     $(LOCAL_PATH)/scripts/prepare-crypto-properties.py \
-    $(LOCAL_PATH)/config/crypto-version-inputs.json
+    $(LOCAL_PATH)/config/crypto-version-inputs.json \
+    $(LOCAL_PATH)/scripts/ensure-gatekeeper-props.py

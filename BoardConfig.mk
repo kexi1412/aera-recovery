@@ -32,6 +32,15 @@ BOARD_RECOVERY_IMAGE_PREPARE += mkdir -p $(addprefix $(TARGET_RECOVERY_ROOT_OUT)
 # AERA_OVERRIDE_SYSTEM_PROPS can run. Only rewrite the recovery property file;
 # compiled SDK/API and boot/AVB version metadata remain the pinned AOSP values.
 BOARD_RECOVERY_IMAGE_PREPARE += && python3 $(DEVICE_PATH)/scripts/prepare-crypto-properties.py $(TARGET_RECOVERY_ROOT_OUT)/prop.default $(DEVICE_PATH)/config/crypto-version-inputs.json
+# The two vendor.gatekeeper.* properties come from PRODUCT_VENDOR_PROPERTIES,
+# i.e. /vendor/build.prop, and no vendor image is built or mounted in
+# recovery (PRODUCT_BUILD_VENDOR_IMAGE := false). astonc.gatekeeper.rc
+# gates the Gatekeeper service on is_security_level_spu, so the service
+# never started and PIN decrypt failed with 'fail to get Gatekeeper
+# service'. Put them in the ramdisk prop, same place the KeyMint OS
+# identity already goes. Runs after the identity rewrite so the two
+# scripts never fight over the file.
+BOARD_RECOVERY_IMAGE_PREPARE += && python3 $(DEVICE_PATH)/scripts/ensure-gatekeeper-props.py $(TARGET_RECOVERY_ROOT_OUT)/prop.default
 # AERA recovery resolves almost every config path through /etc (recovery.fstab,
 # twrp.flags, twrp.fstab, task_profiles.json, cgroups.json, ...), and its
 # init.rc does `symlink /system/etc /etc` at runtime. That symlink fails if /etc

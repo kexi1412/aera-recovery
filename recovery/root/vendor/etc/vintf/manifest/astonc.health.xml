@@ -1,7 +1,28 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!--
+    Corrected HIDL fragment.
+
+    The previous revision was schema-invalid: it declared a HIDL hal but used
+    the element "fqname" with the value "@2.1::IHealth/default".
+
+    "fqname" is the AIDL-only shorthand. A HIDL hal element must carry a
+    "version" element plus an "interface" element containing "name" and
+    "instance". libvintf validates this, and an unparsable fragment sitting
+    next to the gatekeeper fragment is a direct risk to hwservicemanager's
+    manifest reader, which is the same reader whose failure produces the
+    "fail to get Gatekeeper service" symptom.
+
+    Shape follows AOSP health 2.1 default service manifest:
+    name / transport / version / interface / instance.
+-->
 <manifest version="1.0" type="device">
     <hal format="hidl">
         <name>android.hardware.health</name>
         <transport>hwbinder</transport>
-        <fqname>@2.1::IHealth/default</fqname>
+        <version>2.1</version>
+        <interface>
+            <name>IHealth</name>
+            <instance>default</instance>
+        </interface>
     </hal>
 </manifest>
