@@ -1,61 +1,32 @@
 # SPDX-License-Identifier: Apache-2.0
-# Recovery-only Gatekeeper bring-up for the AERA ramdisk.
+# Target service name/class/identity/disabled trigger; see gatekeeper-inputs.json.
+# Recovery diagnostic domain; final narrow HAL policy still requires AVC tests.
 #
-# ROOT CAUSE THIS FIXES
-# ---------------------
-# The stock-derived rc declared the service `disabled`, so the ONLY thing that
-# could ever start it was the property trigger:
+# REVERTED 2026-10: this original shape is CORRECT and must not be "fixed".
 #
-#     on property:vendor.gatekeeper.is_security_level_spu=0
+# A previous revision added `class hal` and dropped `disabled`, on the theory
+# that the service could never start because the property trigger could not
+# fire in recovery. That premise was falsified on hardware: the property IS
+# present in the ramdisk prop.default, the trigger fires, and the service is
+# up and registered under the stock shape.
 #
-# That property is produced by device.mk via PRODUCT_VENDOR_PROPERTIES, which
-# lands in /vendor/build.prop. This device builds a dedicated recovery ramdisk
-# with PRODUCT_BUILD_VENDOR_IMAGE := false, and recovery's init loads only the
-# ramdisk /prop.default for ro.* properties at property_init time; it does not
-# mount /vendor during boot. So the property is absent, the trigger never fires,
-# `gatekeeper-1-0` stays disabled, and TWRP's decrypt path gets "fail to get
-# Gatekeeper service" AFTER it has already read the DE/SP metadata. That exact
-# symptom is recorded in config/gatekeeper-inputs.json.
+#   $ getprop init.svc.gatekeeper-1-0
+#   running
+#   $ lshal | grep -i gatekeeper
+#   DM Y android.hardware.gatekeeper@1.0::IGatekeeper/default @1.0::IGatekeeper  ...  938
 #
-# WHAT CHANGED VS THE TARGET RC, AND WHY
-# --------------------------------------
-#  1. class hal added (keeping early_hal)
-#       Recovery init runs `class_start hal`. Class early_hal is a normal-boot
-#       concept and is never started in recovery, which is why the service had
-#       no path up at all. Joining `hal` gives it a start that depends on
-#       nothing but the class system.
-#
-#  2. `disabled` removed
-#       A disabled service starts only from an explicit trigger. Decryption
-#       must not hinge on a property arriving from a partition recovery does
-#       not mount. scripts/ensure-gatekeeper-props.py now also puts the two
-#       properties into the ramdisk /prop.default as defence in depth, but the
-#       service must be able to come up on its own.
-#
-#  3. user/group left EXACTLY as the target specifies: system / system
-#       config/gatekeeper-inputs.json records user=system, group=[system], and
-#       that is what is kept here. Recovery's vendor/etc/ueventd.rc applies the
-#       target DAC:
-#           /dev/qseecom   0660 system drmrpc
-#           /dev/qce       0660 system drmrpc
-#           /dev/smcinvoke 0660 system drmrpc
-#       The OWNER of every one of those nodes is `system`, so a process running
-#       with uid=system matches the owner class and gets rw. The drmrpc group is
-#       not required for gatekeeper, and adding it would deviate from the target
-#       service identity for no benefit.
-#
-# The HIDL interface name/instance is unchanged, so
-# android.hardware.gatekeeper@1.0::IGatekeeper/default registers as before and
-# the VINTF fragment astonc.gatekeeper.xml stays valid.
-
+# Gatekeeper was never the decrypt blocker. The real blocker was keystore2
+# dying on a missing VINTF declaration; see scripts/fix-recovery-vintf.py.
+# Restored verbatim to avoid regressing a working service.
 service gatekeeper-1-0 /vendor/bin/hw/android.hardware.gatekeeper@1.0-service-qti
-    class hal
     class early_hal
     user system
     group system
+    disabled
     seclabel u:r:recovery:s0
 
-# Retained from the target rc. Now a redundant second chance rather than the
-# single point of failure. `start` on an already-running service is a no-op.
 on property:vendor.gatekeeper.is_security_level_spu=0
+    enable gatekeeper-1-0
+    # TWRP starts class hal, not early_hal. Explicit start also covers enable
+    # before that class is running, without changing the target identity.
     start gatekeeper-1-0

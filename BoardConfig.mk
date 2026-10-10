@@ -32,15 +32,13 @@ BOARD_RECOVERY_IMAGE_PREPARE += mkdir -p $(addprefix $(TARGET_RECOVERY_ROOT_OUT)
 # AERA_OVERRIDE_SYSTEM_PROPS can run. Only rewrite the recovery property file;
 # compiled SDK/API and boot/AVB version metadata remain the pinned AOSP values.
 BOARD_RECOVERY_IMAGE_PREPARE += && python3 $(DEVICE_PATH)/scripts/prepare-crypto-properties.py $(TARGET_RECOVERY_ROOT_OUT)/prop.default $(DEVICE_PATH)/config/crypto-version-inputs.json
-# The two vendor.gatekeeper.* properties come from PRODUCT_VENDOR_PROPERTIES,
-# i.e. /vendor/build.prop, and no vendor image is built or mounted in
-# recovery (PRODUCT_BUILD_VENDOR_IMAGE := false). astonc.gatekeeper.rc
-# gates the Gatekeeper service on is_security_level_spu, so the service
-# never started and PIN decrypt failed with 'fail to get Gatekeeper
-# service'. Put them in the ramdisk prop, same place the KeyMint OS
-# identity already goes. Runs after the identity rewrite so the two
-# scripts never fight over the file.
-BOARD_RECOVERY_IMAGE_PREPARE += && python3 $(DEVICE_PATH)/scripts/ensure-gatekeeper-props.py $(TARGET_RECOVERY_ROOT_OUT)/prop.default
+# The two vendor.gatekeeper.* properties are NOT injected here.
+# An earlier revision did that (scripts/ensure-gatekeeper-props.py), on the
+# theory that they only exist in /vendor/build.prop and therefore could not
+# reach recovery, leaving gatekeeper-1-0 disabled forever. That was measured and
+# falsified: the properties are already present in the ramdisk prop.default of
+# the shipped image, the trigger fires, and the service is up and registered.
+# See the note in recovery/root/system/etc/init/astonc.gatekeeper.rc.
 # AERA recovery resolves almost every config path through /etc (recovery.fstab,
 # twrp.flags, twrp.fstab, task_profiles.json, cgroups.json, ...), and its
 # init.rc does `symlink /system/etc /etc` at runtime. That symlink fails if /etc
@@ -53,6 +51,27 @@ BOARD_RECOVERY_IMAGE_PREPARE += && python3 $(DEVICE_PATH)/scripts/ensure-gatekee
 # ramdisk, relocating the few files the script left there. Runs last, after the
 # AERA script and the device-tree copy.
 BOARD_RECOVERY_IMAGE_PREPARE += && if [ ! -L $(TARGET_RECOVERY_ROOT_OUT)/etc ]; then cp -af $(TARGET_RECOVERY_ROOT_OUT)/etc/. $(TARGET_RECOVERY_ROOT_OUT)/system/etc/ 2>/dev/null; rm -rf $(TARGET_RECOVERY_ROOT_OUT)/etc; ln -s /system/etc $(TARGET_RECOVERY_ROOT_OUT)/etc; fi
+# Recovery stalled at the PIN step on this tree.  Verified on hardware:
+# servicemanager rejected keystore2's registration because
+# android.system.keystore2.IKeystoreService/default was not declared in any
+# VINTF manifest it could read, so the process aborted and Decrypt_DE() spun
+# forever:
+#   servicemanager: Could not find android.system.keystore2.IKeystoreService/
+#       default in the VINTF manifest
+#   init: Service 'keystore2' (pid 2885) received signal 6
+# The framework manifest loader reads /system/etc/vintf/manifest/*.xml ONLY if
+# /system/etc/vintf/manifest.xml exists (VintfObject: if fetchOneHalManifest(
+# kSystemManifest) == OK then addDirectoryManifests(kSystemManifestFragmentDir)
+# else kSystemLegacyManifest).  This tree ships no
+# /system/etc/vintf/manifest.xml, so the whole framework fragment directory is
+# dead and the framework manifest is /system/manifest.xml alone -- which
+# declared only hidl.manager and hidl.token, i.e. no AIDL HAL at all.
+# The vendor side is the control: it DOES ship /vendor/etc/vintf/manifest.xml,
+# so its fragment directory is parsed and gatekeeper/keymint register normally.
+# Same loader, opposite outcome, decided solely by the presence of the main
+# manifest.  Declare the AIDL interfaces there.  Runs last so the AERA prebuilt
+# install and the device-tree copy cannot overwrite the repaired files.
+BOARD_RECOVERY_IMAGE_PREPARE += && python3 $(DEVICE_PATH)/scripts/fix-recovery-vintf.py $(TARGET_RECOVERY_ROOT_OUT)
 
 TARGET_USERIMAGES_USE_EXT4 := true
 TARGET_USERIMAGES_USE_F2FS := true
