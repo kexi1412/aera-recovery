@@ -53,10 +53,63 @@ jobs:
 
       - name: Free disk space
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android/sdk/ndk \
-                      /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          # AOSP builds its own toolchain from prebuilts/, so the runner's
+          # Android SDK and hosted toolcache are dead weight. Removing the whole
+          # SDK rather than only sdk/ndk is worth roughly 10G more, which is the
+          # difference between fitting and not: run 38100739430 died at ~1h with
+          # "No space left on device" once the WiFi targets were added.
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" \
+                      /opt/hostedtoolcache /usr/local/.ghcup /usr/share/swift || true
           sudo apt-get clean
+          echo "=== after cleanup ==="
           df -h
+
+      - name: Pick the build volume
+        id: vol
+        run: |
+          # The AOSP tree plus out/ needs well over 60G. The runner's / is an
+          # ~84G volume that still has little free space after the image, while
+          # /mnt is a separate, nearly empty volume. Hardcoding /mnt would be a
+          # guess, so measure both and pick the larger - and require the mount
+          # to accept execution, because a noexec volume would only surface
+          # later as a baffling compiler error.
+          #
+          # /home is compared instead of / because it lives on the root volume
+          # and is writable without sudo, which keeps the probe honest.
+          #
+          # Context: run 38100739430 built in $GITHUB_WORKSPACE on / and died at
+          # ~1h03m with "No space left on device" while the runner agent was
+          # writing its own diagnostic log - the root volume was full.
+          best=""
+          best_avail=0
+          for cand in /home /mnt; do
+            [ -d "$cand" ] || continue
+            avail=$(df -Pk "$cand" | awk 'NR==2 {print $4}')
+            probe=$(mktemp -d "$cand/.execprobe.XXXXXX" 2>/dev/null) || {
+              echo "$cand: cannot create files, skipping"; continue; }
+            if printf '#!/bin/sh\nexit 0\n' > "$probe/t.sh" &&
+               chmod +x "$probe/t.sh" && "$probe/t.sh"; then
+              echo "$cand: $((avail/1024/1024))GiB free, exec ok"
+            else
+              echo "$cand: $((avail/1024/1024))GiB free, EXEC DENIED - skipping"
+              rm -rf "$probe"; continue
+            fi
+            rm -rf "$probe"
+            if [ "$avail" -gt "$best_avail" ]; then
+              best_avail=$avail; best=$cand
+            fi
+          done
+          if [ -z "$best" ]; then
+            echo "no usable volume found"; exit 1
+          fi
+          work="$best/aera-build"
+          sudo mkdir -p "$work"
+          sudo chown -R "$(id -u):$(id -g)" "$work"
+          echo "root=$best" >> "$GITHUB_OUTPUT"
+          echo "work=$work" >> "$GITHUB_OUTPUT"
+          echo "=== building in $work ==="
+          df -h "$best"
 
       - name: Set up build environment
         run: |
@@ -88,30 +141,38 @@ jobs:
           # (ssh://git@github.com/AERA-Recovery). The repositories are public,
           # so rewrite to HTTPS.
           git config --global url."https://github.com/AERA-Recovery".insteadOf "ssh://git@github.com/AERA-Recovery"
-          ccache -M 30G
-          ccache -z
+          # ccache stays disabled on purpose: it only pays off when the cache
+          # survives between runs, and GitHub caps a repository's cache at 10G
+          # while an AOSP ccache is far larger. Enabling it here would just add
+          # a 30G write onto the volume the build is already filling.
+          ccache -z || true
 
       - name: Add swap
         run: |
-          sudo swapoff /swapfile 2>/dev/null || true
-          sudo rm -f /swapfile
-          sudo fallocate -l 16G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=16384
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
+          # Keep the swapfile on the build volume. On the default layout that
+          # moves 16G off the root volume, which is the one that ran out.
+          swap="${{ steps.vol.outputs.root }}/swapfile"
+          sudo swapoff -a || true
+          sudo rm -f /swapfile "$swap"
+          sudo fallocate -l 16G "$swap" || sudo dd if=/dev/zero of="$swap" bs=1M count=16384
+          sudo chmod 600 "$swap"
+          sudo mkswap "$swap"
+          sudo swapon "$swap"
           free -h
+          df -h
 
       - name: Repo init and sync (AERA manifest, aera-16.0)
         run: |
-          mkdir -p "$GITHUB_WORKSPACE/aera"
-          cd "$GITHUB_WORKSPACE/aera"
+          mkdir -p "${{ steps.vol.outputs.work }}/aera"
+          cd "${{ steps.vol.outputs.work }}/aera"
           repo init -u https://github.com/AERA-Recovery/android_manifest.git \
             -b aera-16.0 --git-lfs --depth=1
           repo sync -c --force-sync --no-clone-bundle --no-tags -j"$(nproc --all)"
+          df -h
 
       - name: Install device tree
         run: |
-          cd "$GITHUB_WORKSPACE/aera"
+          cd "${{ steps.vol.outputs.work }}/aera"
           rm -rf device/oneplus/astonc
           mkdir -p device/oneplus
           cp -a "$GITHUB_WORKSPACE/device_tree" device/oneplus/astonc
@@ -120,7 +181,7 @@ jobs:
 
       - name: Apply upstream source fixes
         run: |
-          cd "$GITHUB_WORKSPACE/aera"
+          cd "${{ steps.vol.outputs.work }}/aera"
           # AERA's partitionmanager.cpp references AID_MEDIA_RW without
           # including the header that declares it (data.cpp and
           # twrp-functions.cpp, which use the same symbol, both include it).
@@ -137,7 +198,7 @@ jobs:
 
       - name: Build recovery
         run: |
-          cd "$GITHUB_WORKSPACE/aera"
+          cd "${{ steps.vol.outputs.work }}/aera"
           export ALLOW_MISSING_DEPENDENCIES=true
           export LC_ALL=C
           source device/oneplus/astonc/vendorsetup.sh
@@ -147,7 +208,13 @@ jobs:
 
       - name: Show ccache stats
         if: always()
-        run: ccache -s
+        run: ccache -s || true
+
+      - name: Disk usage after build
+        if: always()
+        run: |
+          df -h
+          du -sh "${{ steps.vol.outputs.work }}/aera/out" 2>/dev/null || true
 
       - name: Upload recovery image
         if: always()
@@ -155,7 +222,7 @@ jobs:
         with:
           name: aera-recovery-astonc
           path: |
-            aera/out/target/product/astonc/recovery.img
-            aera/out/target/product/astonc/*.img
+            ${{ steps.vol.outputs.work }}/aera/out/target/product/astonc/recovery.img
+            ${{ steps.vol.outputs.work }}/aera/out/target/product/astonc/*.img
           if-no-files-found: warn
           retention-days: 14
