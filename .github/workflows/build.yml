@@ -405,14 +405,36 @@ jobs:
           : > "$log"
           : > "$disklog"
 
-          # Sample free space every two minutes for the whole compile. Every
-          # disk conclusion so far has been inferred after the fact from a
-          # one-line error; this produces the actual curve, so the next change
-          # is aimed at a measured number instead of a guess.
+          # Sample free space every two minutes for the whole compile, and
+          # heartbeat to stdout as well. Every disk conclusion so far has been
+          # inferred after the fact from a one-line error; this produces the
+          # actual curve, so the next change is aimed at a measured number.
+          #
+          # The heartbeat matters for a second reason: soong's analysis phase
+          # prints nothing for several minutes, so a healthy build and a hung
+          # one are indistinguishable in the step output. Run 38134563574 was
+          # SIGTERMed by the runner at 25m ("The runner has received a shutdown
+          # signal", exit 143) and steps 16-19 never ran despite `if: always()`
+          # - a killed runner executes no further steps. The step output is the
+          # only thing that survives that, so it has to carry the evidence.
+          #
+          # Free memory is reported for the same reason. That run announced
+          # "You are building on a machine with 15.6GB of RAM" while AOSP asks
+          # for 16GB, so memory exhaustion is the leading explanation for a
+          # SIGTERM whose only symptom is silence; the OOM killer's own message
+          # goes to dmesg, which never reaches this log.
           (
+            start=$(date +%s)
             while :; do
               printf '[%s] ' "$(date +%H:%M:%S)" >> "$disklog"
               df -Ph . 2>/dev/null | awk 'NR==2 {print $4" avail, "$3" used, "$5" ("$2" size)"}' >> "$disklog"
+              elapsed=$(( $(date +%s) - start ))
+              last=$(tail -n 1 "$log" 2>/dev/null | tr -d '\r' | cut -c1-140)
+              printf 'heartbeat %dm%02ds | disk %s | mem avail %s | last: %s\n' \
+                $((elapsed / 60)) $((elapsed % 60)) \
+                "$(df -Ph . 2>/dev/null | awk 'NR==2 {print $4}')" \
+                "$(free -m 2>/dev/null | awk '/^Mem:/ {print $7"MB"}')" \
+                "$last"
               sleep 120
             done
           ) &
