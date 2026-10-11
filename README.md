@@ -26,8 +26,14 @@ fastbootd 只读查询及返回、Sideload 连接/取消返回。
 自带 WPE 界面、联网、云端备份等组件，且其启动期与 OrangeFox 不同，
 需重新跑一遍启动/显示/触摸/解密/备份验收，不能直接沿用 OrangeFox 结论。
 压缩备份引擎、Recovery 界面锁、其他 Android 锁屏类型仍未通过验收；
-MTP 当前关闭；震动无效，用户接受暂缓。SELinux 保留上游/debug 的八个
+震动无效，用户接受暂缓。SELinux 保留上游/debug 的八个
 permissive domains，尚不是全域 enforcing。
+
+MTP 与 WiFi 已从"关闭"改为构建进镜像：MTP 走 FunctionFS（`/dev/usb-ffs/mtp`
++ `sys.usb.config=mtp,adb`），WiFi 走 `wlan0` + wpa_supplicant。
+`AERA_ADVANCED_SECURITY` 必须保持未设置——它会在启动时打印
+"ADB & MTP disabled by maintainer" 并跳过 `Enable_MTP()`。**本树尚未在真机
+刷入验证这两项**，刷入后需确认 `tw_mtp_enabled` 与 `wlan0` 是否就绪。
 
 ## 编译
 
