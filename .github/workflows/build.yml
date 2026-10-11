@@ -11,6 +11,14 @@ on:
 permissions:
   contents: read
 
+# A newer push supersedes the running build. Without this, pushing several
+# commits in a row leaves one run per push all racing through the same
+# serialized `repo sync`, and the stale ones have to be cancelled by hand.
+# `github.ref` keeps main and aera-16.0 independent.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-22.04
