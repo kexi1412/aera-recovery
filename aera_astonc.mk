@@ -7,9 +7,13 @@
 # build system translates them to their backend names.
 #
 
-# Maintainer identity shown in the AERA UI. AERA begins at R1.0; no legacy
-# maintainer patch suffix is appended.
-AERA_MAINTAINER := rkbkosp
+# Maintainer identity shown in the AERA UI. This string is what the About page
+# renders in its MAINTAINER row:
+#   aera_astonc.mk (here) -> aera_build.mk appends -DAERA_MAINTAINER
+#   -> data.cpp stores it as the "aera_maintainer" constant
+#   -> aera_backend.cpp reads it -> about_scene.cpp IdentityRow("MAINTAINER", ...)
+# AERA begins at R1.0; no legacy maintainer patch suffix is appended.
+AERA_MAINTAINER := kexi1412
 
 # OnePlus Ace 3 is 1264x2780. The punch-hole occupies y=40..112 (center 76);
 # leave 40px below the hole for the status chrome.
