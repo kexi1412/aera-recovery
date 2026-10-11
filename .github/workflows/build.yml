@@ -2,6 +2,14 @@ name: Build AERA Recovery (astonc)
 
 on:
   workflow_dispatch:
+    inputs:
+      # Tuning parallelism used to require a commit, and a commit cancels or
+      # queues the build that is already running. Exposing it here means "-j is
+      # too high, lower it" costs one button press instead of another hour.
+      jobs:
+        description: 'Parallel jobs for mka (default 4, max 8)'
+        required: false
+        default: '4'
   push:
     branches: [main, aera-16.0]
     paths-ignore:
@@ -11,13 +19,18 @@ on:
 permissions:
   contents: read
 
-# A newer push supersedes the running build. Without this, pushing several
-# commits in a row leaves one run per push all racing through the same
-# serialized `repo sync`, and the stale ones have to be cancelled by hand.
-# `github.ref` keeps main and aera-16.0 independent.
+# Serialize builds per branch so several pushes do not all race through the
+# same `repo sync`. `github.ref` keeps main and aera-16.0 independent.
+#
+# cancel-in-progress is FALSE on purpose. It was true, and it cost a real
+# build: run #19 had been compiling for 1h23m when a later push superseded it
+# and the runner reported "Canceling since a higher priority waiting request".
+# AOSP compiles take the better part of an hour, so killing a running build to
+# start a newer one throws away far more than it saves. Queue instead: the
+# newer push waits its turn.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -319,38 +332,171 @@ jobs:
             echo "$f already includes android_filesystem_config.h"
           fi
 
+          # aera_build.mk lives in AERA-Recovery/android_bootable_recovery, a
+          # different repository this project cannot push to, so the change is
+          # applied here at build time.
+          #
+          # Upstream hangs NAS's two modules off the Wi-Fi block:
+          #     TWRP_REQUIRED_MODULES += wpa_supplicant ... dhcptool \
+          #         rclone_prebuilt \
+          #         fusermount3
+          # rclone_prebuilt compiles rclone (a full Go program) and
+          # fusermount3 compiles libfuse. Neither is a Wi-Fi dependency; the
+          # only consumers are NasManager.cpp and smb_browser.cpp, and both
+          # reach the binaries through runtime path strings ("/system/bin/
+          # rclone") and report "is missing" instead of failing to link. They
+          # are the last few GB on a volume that had already filled up (run
+          # 38100739430 died with "No space left on device" at ~1h03m, having
+          # compiled further than any other attempt).
+          #
+          # Both module names are unique in this file, so deleting the exact
+          # lines is safe and cannot hit an unrelated rule. `dhcptool` becomes
+          # the last item, which is why its trailing backslash goes away.
+          mk=bootable/recovery/aera_build.mk
+          if grep -q 'rclone_prebuilt' "$mk"; then
+            # Keep the copy outside the source tree: a stray aera_build.mk.orig
+            # sitting next to the real file is exactly the sort of thing a
+            # later `$(wildcard)` or packaging step could pick up.
+            cp "$mk" "${{ steps.vol.outputs.work }}/aera_build.mk.orig"
+            sed -i '/^[[:space:]]*rclone_prebuilt[[:space:]]*\\$/d' "$mk"
+            sed -i '/^[[:space:]]*fusermount3[[:space:]]*$/d' "$mk"
+            sed -i 's/^\([[:space:]]*dhcptool\)[[:space:]]*\\$/\1/' "$mk"
+            # Prove the edit landed and stopped the list cleanly. A silent
+            # no-op here would just reproduce the out-of-disk failure.
+            # Anchored on dhcptool rather than on "TWRP_REQUIRED_MODULES +="
+            # because that pattern appears several times in this file and the
+            # first match is an unrelated rule near the top.
+            echo "--- Wi-Fi module list after patch ---"
+            grep -n -B7 -A3 'dhcptool' "$mk" || true
+            if grep -q 'rclone_prebuilt\|fusermount3' "$mk"; then
+              echo "::error::rclone_prebuilt/fusermount3 still present after patch"
+              exit 1
+            fi
+            if ! grep -qE '^[[:space:]]*dhcptool[[:space:]]*$' "$mk"; then
+              echo "::error::dhcptool is not the last list item; the trailing backslash was not fixed"
+              exit 1
+            fi
+          else
+            echo "$mk does not carry rclone_prebuilt (upstream may have moved it)"
+          fi
+
       - name: Build recovery
+        env:
+          # Passed through env rather than interpolated into the script, so a
+          # value from the dispatch form can never become shell syntax.
+          JOBS_INPUT: ${{ github.event.inputs.jobs }}
         run: |
-          cd "${{ steps.vol.outputs.work }}/aera"
+          work="${{ steps.vol.outputs.work }}"
+          cd "$work/aera"
           export ALLOW_MISSING_DEPENDENCIES=true
           export LC_ALL=C
           # Compiler scratch follows the build volume; /tmp lives on root, the
           # volume that ran out.
-          export TMPDIR="${{ steps.vol.outputs.work }}/tmp"
+          export TMPDIR="$work/tmp"
           mkdir -p "$TMPDIR"
+
+          # Capture the whole build to a file. The REST job-log endpoints for
+          # this repo answer 401/404, so without a captured log every failure
+          # can only be guessed at - and guessing has already cost several
+          # runs. The tail of this file is echoed into the step output by the
+          # next step, which survives even when the log download does not.
+          log="$work/build.log"
+          disklog="$work/disk.log"
+          : > "$log"
+          : > "$disklog"
+
+          # Sample free space every two minutes for the whole compile. Every
+          # disk conclusion so far has been inferred after the fact from a
+          # one-line error; this produces the actual curve, so the next change
+          # is aimed at a measured number instead of a guess.
+          (
+            while :; do
+              printf '[%s] ' "$(date +%H:%M:%S)" >> "$disklog"
+              df -Ph . 2>/dev/null | awk 'NR==2 {print $4" avail, "$3" used, "$5" ("$2" size)"}' >> "$disklog"
+              sleep 120
+            done
+          ) &
+          sampler=$!
 
           # Record headroom up front. Run 38100739430 died at ~1h03m with
           # "No space left on device" - this line is what proves, next time,
           # whether the volume was already tight before compiling started.
-          avail=$(df -Pk . | awk 'NR==2 {print $4}')
-          echo "build volume free before compile: $((avail/1024/1024))GiB"
+          avail=$(df -Pk . 2>/dev/null | awk 'NR==2 {print $4}')
+          case "$avail" in ''|*[!0-9]*) avail=0;; esac
+          echo "build volume free before compile: $((avail/1024/1024))GiB" | tee -a "$log"
           if [ "$avail" -lt $((20*1024*1024)) ]; then
             echo "::warning::under 20GiB free; the build may run out of space"
           fi
+          du -sh . 2>/dev/null | tee -a "$log" || true
+          df -h . | tee -a "$log"
 
           source device/oneplus/astonc/vendorsetup.sh
           source build/envsetup.sh
           lunch twrp_astonc-bp2a-eng
 
           # Cap parallelism. AOSP link steps peak in the multi-GB range and an
-          # OOM kill mid-build costs the whole run. Guarded with if/else rather
-          # than `[ .. ] &&` because of errexit.
-          jobs=$(nproc --all)
-          if [ "$jobs" -gt 4 ]; then jobs=4; fi
-          echo "building with -j$jobs"
-          mka adbd recoveryimage -j"$jobs" || mka adbd recoveryimage -j"$jobs"
+          # OOM kill mid-build costs the whole run. `JOBS_INPUT` can be set from
+          # a manual workflow_dispatch run, which means tuning it no longer
+          # needs a commit - and a commit no longer risks disturbing a build
+          # that is already running. Guarded with if/else rather than
+          # `[ .. ] &&` because of errexit.
+          jobs=4
+          if [ -n "${JOBS_INPUT:-}" ]; then jobs="$JOBS_INPUT"; fi
+          case "$jobs" in ''|*[!0-9]*) jobs=4;; esac
+          if [ "$jobs" -lt 1 ]; then jobs=1; fi
+          if [ "$jobs" -gt 8 ]; then jobs=8; fi
+          ncpu=$(nproc --all)
+          if [ "$jobs" -gt "$ncpu" ]; then jobs="$ncpu"; fi
+          echo "building with -j$jobs (nproc=$ncpu)" | tee -a "$log"
 
-          df -h .
+          # Piping into tee would mask mka's own exit status, so read
+          # PIPESTATUS[0] instead. `set -o pipefail` is deliberately not used:
+          # the retry below must still run after a failed first attempt.
+          run_build() {
+            mka adbd recoveryimage -j"$jobs" 2>&1 | tee -a "$log"
+            return "${PIPESTATUS[0]}"
+          }
+
+          rc=0
+          run_build || rc=$?
+          if [ "$rc" -ne 0 ]; then
+            echo "::warning::first build attempt exited $rc; retrying once"
+            echo "=== retry ===" | tee -a "$log"
+            rc=0
+            run_build || rc=$?
+          fi
+
+          kill "$sampler" 2>/dev/null || true
+          wait "$sampler" 2>/dev/null || true
+
+          echo "=== build exit status: $rc ===" | tee -a "$log"
+          df -h . | tee -a "$log"
+          ls -l out/target/product/astonc/recovery.img 2>/dev/null | tee -a "$log" || true
+          exit "$rc"
+
+      - name: Show disk curve and build log tail
+        if: always()
+        run: |
+          # The REST job-log endpoint for this repo returns 401/404, so the
+          # step output is the only channel that survives. Echo the free-space
+          # curve and the last stretch of the captured build log into it.
+          work="${{ steps.vol.outputs.work }}"
+          echo "=== free space over the compile ==="
+          if [ -s "$work/disk.log" ]; then cat "$work/disk.log"; else echo "(no samples)"; fi
+
+          log="$work/build.log"
+          if [ ! -s "$log" ]; then
+            echo "no captured build log at $log"
+            exit 0
+          fi
+          echo "=== $log: $(wc -l < "$log") lines ==="
+          echo "=== first 40 ==="
+          head -40 "$log"
+          echo "=== last 150 ==="
+          tail -150 "$log"
+          echo "=== error lines (max 60) ==="
+          grep -nE '(error:|Error:|ERROR|FAILED|ninja: build stopped|No space left|Killed|undefined reference)' "$log" \
+            | tail -60 || true
 
       - name: Show ccache stats
         if: always()
