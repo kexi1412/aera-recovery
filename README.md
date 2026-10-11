@@ -77,12 +77,22 @@ product 名称；AERA 与 OrangeFox 一样，product 前缀仍是 `twrp_`，设�
   逐字保留（本机已验证的 QTI 解密路径）。与 AERA 通用 `device/qcom/twrp-common`
   qcom_decrypt 并存时注意 service 命名冲突。
 
-## 来源与维护
+## 维护与来源
 
-AERA official `aera-16.0`；硬件配置来源为已验证的 OrangeFox `astonc` 树
-（主项目 `rkbkosp/astonc-orangefox`）、LineageOS astonc / sm8550-common
-`lineage-23.2` 以及目标 stock/current 输入。本树与 OrangeFox / TWRP 的
-`rkbkosp/android_device_oneplus_astonc*` 仓库分别维护。
+**维护者：kexi1412**（`kexi1412/aera-recovery`）。本树由本仓库独立维护，
+不走上游设备树的分支或 PR 流程；改动直接落在本仓库 `main`。
+界面 About 页的 MAINTAINER 行即此署名（`AERA_MAINTAINER`）。
+
+配置基线来源（仅指硬件参数与已实测数据取自哪里，与维护权无关）：
+
+- AERA official `aera-16.0`（框架、构建系统、LVGL 界面后端）
+- 已验证的 OrangeFox `astonc` 树（`rkbkosp/astonc-orangefox`）—— fstab、
+  crypto、sepolicy、init rc、relink 库表的原始出处
+- LineageOS astonc / sm8550-common `lineage-23.2`
+- 目标 stock/current 输入（见 `PROVENANCE.json` 的 commit 与 SHA256 记录）
+
+`PROVENANCE.json` 的 `source_*` 字段指的就是上述第二项，属于可追溯性记录，
+不是对本仓库归属的声明。
 
 目标 ROM、boot/vendor_boot ABI 或 security patch 改变时重新收集 baseline；
 不要替换旧 blobs、删除 FBE 参数或伪造 security patch 来绕过故障。

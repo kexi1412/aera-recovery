@@ -1,4 +1,6 @@
 {
+  "maintainer": "kexi1412",
+  "maintainer_repository": "https://github.com/kexi1412/aera-recovery",
   "source_repository": "https://github.com/rkbkosp/astonc-orangefox",
   "source_commit": "04e267d5de5af7a92187f6325e2deda71b5b8686",
   "source_subdirectory": "device/oneplus/astonc",
@@ -88,11 +90,15 @@
     },
     {
       "path": "recovery/root/init.recovery.qcom.rc",
-      "sha256": "db30b37028a6e009a04c8f121b3f44b360527fa7729173964fc7886f347af64e"
+      "sha256": "fa4253e8dea762bac0168f07b769963bffc3fea2e7da1d6d458cb7204f244201"
+    },
+    {
+      "path": "recovery/root/init.recovery.wifi.rc",
+      "sha256": "1540260ebb85784a528bab341512bf849d2512b2ee4e30a43eec5828f1e08b63"
     },
     {
       "path": "recovery/root/init.recovery.usb.rc",
-      "sha256": "a159f57af9d67252b97d6f71835e2191a9b29d9d9aa8f217622902ece46ef699"
+      "sha256": "bf83625da020ae6541ce5577e422ed5ebdcb203f51259f8fc414ccc2674faaa0"
     },
     {
       "path": "recovery/root/lib/firmware",
@@ -132,7 +138,7 @@
     },
     {
       "path": "recovery/root/system/etc/recovery.fstab",
-      "sha256": "4e7c52a2e0e45e0973516dcc1fe9f1d9da2dd0d02c0f14c1ed29906896a73e0d"
+      "sha256": "5624424216619560f9283c4ca337a337517869e89911b35178e49a83a886fee1"
     },
     {
       "path": "recovery/root/system/etc/twrp.flags",
@@ -156,7 +162,7 @@
     },
     {
       "path": "recovery/root/vendor/etc/ueventd.rc",
-      "sha256": "99dc2a5d87474e3b9c9641178a81876671f541681bf8d0929e7c421cb6fda5d6"
+      "sha256": "8e6585e318af4ee743047d3fc059260865c469474922d6c35403319a02ec2e7f"
     },
     {
       "path": "recovery/root/vendor/etc/vintf/compatibility_matrix.xml",
