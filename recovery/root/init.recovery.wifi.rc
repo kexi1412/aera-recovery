@@ -1,0 +1,191 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Wi-Fi bring-up for AERA recovery on astonc (OnePlus Ace 3 / SM8550 kalama).
+#
+# Imported from init.recovery.qcom.rc, which etc/init.rc pulls in as
+# /init.recovery.${ro.hardware}.rc with ro.hardware=qcom.
+#
+# ---------------------------------------------------------------------------
+# Why init has to do this at all
+# ---------------------------------------------------------------------------
+# wlan.cpp never execs a driver binary. Its cold-start path is
+#     Wlan::Enable() -> StartSupplicant() -> StartInitSupplicantService()
+#         property_set("sys.aera.wlan.up", "1")          <-- the trigger below
+#         WaitForProperty("init.svc.wpa_supplicant", "running", 20000)
+#         WaitForSupplicantReady(60000)                  <-- PINGs <ctrl_dir>/wlan0,
+#                                                            needs "PONG"
+# so nothing happens until an init block consumes sys.aera.wlan.up, kicks cnss2,
+# and starts a wpa_supplicant that publishes a per-interface control socket.
+#
+# ---------------------------------------------------------------------------
+# The driver stack
+# ---------------------------------------------------------------------------
+# The bound host driver on this device is qca_cld3_kiwi_v2, not qca_cld3_kiwi:
+# the latter refuses this silicon with "Driver built for chip ver 0x1, enumerated
+# ver 0x2, reject unsupported driver". /proc/modules on the live device shows
+#     cnss2 606208 1 kiwi_v2, Live
+#     cfg80211 1462272 2 kiwi_v2,mac80211, Live
+# confirming the v2 driver owns cnss2. The modules are requested through
+# AERA_LOAD_VENDOR_MODULES in aera_astonc.mk and loaded by
+# KernelModuleLoader::Load_Vendor_Modules() from /vendor_dlkm/lib/modules
+# (/vendor/lib/modules is a symlink to that directory on this device).
+#
+# ---------------------------------------------------------------------------
+# cnss2 cold-boot calibration
+# ---------------------------------------------------------------------------
+# cnss2 does not touch the WLAN hardware until the platform driver's fs_ready
+# attribute is written. The vendor tree does this from init.target.rc:
+#     on post-fs-data
+#         write /sys/kernel/cnss/fs_ready 1
+# and the 6490 variant does the same via
+#     write /sys/devices/platform/soc/b0000000.qcom,cnss-qca6490/fs_ready 1
+# On this device the node resolved from the DT node
+# soc/qcom,cnss-qca-converged is /sys/kernel/cnss/fs_ready
+# (== /sys/devices/platform/soc/b0000000.qcom,cnss-qca-converged/fs_ready; the
+# two paths are the same kobject, verified on the running device).
+#
+# It is written here rather than at post-fs-data on purpose. fs_ready is created
+# by cnss2's probe, and cnss2 is loaded much later: Load_Vendor_Modules() runs
+# from PartitionManager's fstab parse, i.e. after post-fs-data has already
+# passed. Writing the attribute at post-fs-data would therefore hit a
+# non-existent path and silently do nothing. Doing it inside the
+# sys.aera.wlan.up=1 action guarantees cnss2 is resident.
+#
+# ---------------------------------------------------------------------------
+# Where the firmware and config come from
+# ---------------------------------------------------------------------------
+# Firmware is resolved by the kernel's firmware_class loader by relative name
+# against the ueventd firmware_directories list in this ramdisk's
+# /vendor/etc/ueventd.rc -- not by any hardcoded path. Strings in the shipped
+# modules show exactly which names get requested:
+#     cnss2.ko       ->  amss.bin, amss20.bin, bdwlan.elf, bdwlang.elf,
+#                        bdwlan%02x.e%02x, "kiwi/%s"
+#     qca_cld3_kiwi_v2.ko ->  "wlan/WCNSS_qcom_cfg.ini"
+# so the list has to cover all four sources, which is why ueventd.rc carries the
+# vendor's own superset:
+#     /mnt/vendor/persist/copy/ /odm/etc/wifi/ /mnt/vendor/persist/
+#     /vendor/firmware_mnt/image/
+#     * /vendor/firmware_mnt/image/kiwi/{amss.bin,amss20.bin,bdwlan.elf,
+#       bdwlan.e01..e39,regdb.bin} supplies the "kiwi/%s" requests
+#     * /odm/etc/wifi/{bdwlan.elf,regdb.bin} supplies the BDF fallback
+#     * /mnt/vendor/persist/wlan/WCNSS_qcom_cfg.ini supplies the ini; note the
+#       driver asks for "wlan/WCNSS_qcom_cfg.ini", which no other listed
+#       directory provides (/vendor/firmware/wlan/ holds only qca_cld/<chip>/
+#       copies, not a top-level file)
+#
+# That last point is why /mnt/vendor/persist has to be mounted before the
+# driver's config load, which the fstab entry for persist and the mount below
+# take care of; the recovery ramdisk previously did not mount it at all.
+#
+# No WiFi config or BDF blob is shipped in the ramdisk. /vendor and /odm are
+# erofs read-only mounts of the real partitions and already hold the
+# authoritative copies, so duplicating them would only consume the fixed 100 MiB
+# image budget. The supplicant VINTF manifest is likewise not shipped:
+# aera_build.mk installs it automatically from $(TARGET_OUT_VENDOR_ETC).
+#
+# /vendor is read-only and /vendor/firmware_mnt is a read-only vfat, so
+# Wlan::PrepareStableMacFirmware() cannot persist its synthesized MAC. That is
+# harmless: Wlan::Init() logs the failure and continues, and the driver then uses
+# the factory MAC already in /vendor/firmware/wlan/qca_cld/kiwi_v2/wlan_mac.bin.
+# No writable overlay is staged for it.
+
+# ---------------------------------------------------------------------------
+# Storage the firmware loader needs
+# ---------------------------------------------------------------------------
+# persist is a real ext4 partition (/dev/block/sda2, symlinked as persist in
+# /dev/block/by-name) and holds wlan/WCNSS_qcom_cfg.ini. It is not on /data and
+# is not covered by any other mount in the recovery ramdisk, so mount it
+# explicitly before the driver can be asked to load its config. Mounted rw to
+# match the vendor fstab, which is how the bdf copy directories under
+# /mnt/vendor/persist/copy/ stay usable.
+on post-fs
+    mkdir /mnt/vendor 0755 root system
+    mkdir /mnt/vendor/persist 0771 system system
+    # Options are separate tokens: init's do_mount() matches each argument from
+    # index 4 against its mount_flags table (noatime/nodev/nosuid/rw/wait/...).
+    # A comma-joined "noatime,nosuid,nodev" is not in that table and would be
+    # swallowed as a raw mount data string instead. Any trailing argument that is
+    # neither a known flag nor "wait" becomes the mount data string, which is how
+    # barrier=1 (a real ext4 option, not an init flag) gets through last. This
+    # reproduces the vendor fstab.qcom line for persist exactly:
+    #   /dev/block/bootdevice/by-name/persist /mnt/vendor/persist ext4
+    #       noatime,nosuid,nodev,barrier=1 wait
+    mount ext4 /dev/block/by-name/persist /mnt/vendor/persist rw noatime nosuid nodev wait barrier=1
+
+    # Control directory. Wlan::GetCtrlDir() defaults to /tmp/recovery/sockets and
+    # EnsureSuppChannel() connects straight to <ctrl_dir>/<iface> expecting PONG.
+    # StartSupplicant() does call MkdirRecursive(GetCtrlDir()), but creating it
+    # here as well costs nothing and removes any ordering dependency.
+    mkdir /tmp/recovery 0755 root system
+    mkdir /tmp/recovery/sockets 0771 root system
+
+# ---------------------------------------------------------------------------
+# Supplicant
+# ---------------------------------------------------------------------------
+# The binary is /system/bin/wpa_supplicant, not /vendor/bin/hw/wpa_supplicant.
+# prebuilt/Android.mk drives relink_binaries, which copies every
+# RECOVERY_BINARY_SOURCE_FILES entry by basename into
+# $(TARGET_RECOVERY_ROOT_OUT)/system/bin, and aera_build.mk puts
+# $(TARGET_OUT_VENDOR_EXECUTABLES)/hw/wpa_supplicant on that list. So whatever
+# directory it was built in, it is installed as /system/bin/wpa_supplicant.
+#
+# The /system/bin/sh wrapper exists to decouple "the service is running" from
+# "wlan0 exists yet". StartInitSupplicantService() allows only 20 seconds for
+# init.svc.wpa_supplicant to reach running, but cnss2 must power the PCIe
+# endpoint and download amss.bin/bdwlan.elf before wlan0 appears, which on this
+# silicon routinely exceeds that. Exec'ing wpa_supplicant directly against a
+# missing wlan0 makes it exit immediately, the 20s wait fails, and Wlan::Enable()
+# reports "failed to start supplicant service". Keeping the wrapper alive makes
+# the service running at once, and Wlan's separate 60s
+# WaitForSupplicantReady() covers the rest.
+#
+# Flags, all verified against wpa_supplicant v2.11-devel-13 on the live device
+# (its own -h output: "-C = ctrl_interface parameter (only used if -c is not)",
+# "-O = override ctrl_interface parameter for new interfaces"):
+#   -Dnl80211   cfg80211/nl80211 driver interface; this is what the vendor build
+#               and the AOSP recovery build both use, and it is the only driver
+#               the shipped binary advertises.
+#   -O          forces the control interface to the directory AERA reads. -O is
+#               used instead of -C because the device conf does not define
+#               ctrl_interface and -O overrides unconditionally.
+#   -c          the device's real supplicant conf on the read-only /vendor mount.
+#               Wlan::EnsureSupplicantConf() would otherwise try to create
+#               /vendor/etc/wifi/wpa_supplicant.conf with
+#               ctrl_interface=/data/misc/wifi/sockets, a path that neither
+#               exists in recovery nor matches GetCtrlDir().
+#
+# oneshot is deliberately NOT set: a supplicant that dies should come back.
+# There is no restart-loop hazard because the wrapper blocks until wlan0 exists.
+service wpa_supplicant /system/bin/sh -c "until [ -e /sys/class/net/wlan0 ]; do sleep 1; done; exec /system/bin/wpa_supplicant -Dnl80211 -iwlan0 -O/tmp/recovery/sockets -c/vendor/etc/wifi/wpa_supplicant.conf"
+    class main
+    user root
+    group root system inet wifi net_admin
+    disabled
+    seclabel u:r:recovery:s0
+
+# ---------------------------------------------------------------------------
+# Bring-up trigger
+# ---------------------------------------------------------------------------
+# This is the block StartInitSupplicantService() expects: it sets the property
+# and relies on init to prepare the driver and start the service. The trailing
+# reset to 0 is required, because that function only ever performs a plain set to
+# 1 and depends on a fresh 0 -> 1 transition to re-fire this action on a later
+# attempt.
+on property:sys.aera.wlan.up=1
+    mkdir /tmp/recovery 0755 root system
+    mkdir /tmp/recovery/sockets 0771 root system
+
+    # cnss2 cold-boot calibration. chmod is belt-and-braces: init runs as root
+    # and the attribute is already owner-writable (--w------- root root), but the
+    # vendor trees do the same and it costs one line.
+    #
+    # `wait` guards the load ordering: the attribute is created by cnss2's probe,
+    # and modules are loaded by the recovery binary rather than by init, so the
+    # node may lag this property write by a moment. init's wait retries until the
+    # path exists (it is a no-op when cnss2 registered early).
+    wait /sys/kernel/cnss 5
+    chmod 0222 /sys/kernel/cnss/fs_ready
+    write /sys/kernel/cnss/fs_ready 1
+
+    start wpa_supplicant
+    setprop sys.aera.wlan.up 0

@@ -62,8 +62,23 @@ if [ "$1" = "$FDEVICE" -o "$AERA_BUILD_DEVICE" = "$FDEVICE" ]; then
     export AERA_ENABLE_KERNELSU_NEXT_SUPPORT=1
     export AERA_ENABLE_SUKISU_SUPPORT=1
 
-    # Advanced security prompt for a user-facing recovery.
-    export AERA_ADVANCED_SECURITY=1
+    # Advanced security is intentionally NOT enabled.
+    #
+    # AERA_ADVANCED_SECURITY maps to OF_ADVANCED_SECURITY, and twrp.cpp:317-321
+    # turns that into a hard MTP/adb shutdown:
+    #     LOGINFO("ADB & MTP disabled by maintainer\n");
+    #     fox_advanced_security = 1;
+    #     tw_mtp_enabled = 0;            // and stops adbd
+    # Because it takes the branch, the #else block at twrp.cpp:322-343 -- which is
+    # what calls Enable_MTP() and reports "mtp_enabled=MTP Enabled" -- never runs.
+    # No amount of init.rc configfs work in recovery/root/init.recovery.usb.rc can
+    # bring MTP back afterwards, since the recovery binary itself has already
+    # declined to open /dev/usb-ffs/mtp/ep0.
+    #
+    # Note this is also what the build type must not re-add: aera_build.mk:164-167
+    # forces OF_ADVANCED_SECURITY when AERA_BUILD_TYPE=Stable. This device builds
+    # as Beta, so leaving the variable unset here is sufficient.
+    unset AERA_ADVANCED_SECURITY
 
     # Keep the installed splash; do not replace the boot splash partition.
     export AERA_NO_SPLASH_CHANGE=1

@@ -1,3 +1,116 @@
 # SPDX-License-Identifier: Apache-2.0
-# ADB/sideload/fastboot configfs actions come from TWRP etc/init.rc.
-# MTP configuration is deferred until storage bring-up.
+#
+# Device-owned USB additions for AERA recovery on astonc (OnePlus Ace 3 /
+# SM8550 kalama).
+#
+# The shared AERA etc/init.rc already supplies the ADB / sideload / fastboot
+# configfs actions and imports this file from system/etc/init/hw/init.rc line 4,
+# so this file only adds the MTP FunctionFS function that upstream never creates.
+#
+# Ordering rule that decides the triggers below: this file is imported at
+# init.rc line 4, which is parsed BEFORE the main body of init.rc. Actions
+# sharing a trigger run in parse order, so an `on fs` here executes before the
+# upstream `on fs && property:sys.usb.configfs=1` block that creates
+# /config/usb_gadget/g1 and mounts /dev/usb-ffs/{adb,fastboot}. Anything that
+# mkdir/mounts under those paths therefore has to live in `on post-fs` or later,
+# because the gadget and its functions/ directory do not exist any earlier.
+
+# ---------------------------------------------------------------------------
+# FunctionFS for MTP
+# ---------------------------------------------------------------------------
+# TW_HAS_MTP only makes the recovery binary *willing* to start MTP.
+# PartitionManager::Enable_MTP() then opens /dev/usb-ffs/mtp/ep0
+# (MtpDescriptors.h: FFS_MTP_EP0) and falls back to /dev/mtp_usb, which this
+# kernel does not provide. Verified against the previously built image: its
+# recovery ramdisk had no functions/ffs.mtp in the gadget and no /dev/usb-ffs/mtp
+# at all, so MTP could never reach the host no matter which configfs properties
+# were set.
+#
+# uid/gid 1000 and rmode/fmode 0660 are copied from the upstream fastboot mount
+# in the same init.rc, which is known to work on this kernel. The MTP server is
+# forked from the recovery process, which runs as root, so it reaches ep0 either
+# way. `no_disconnect` is deliberately omitted for the same reason it is absent
+# there: when Disable_MTP() SIGKILLs the server and ep0 closes, the gadget
+# re-enumerates cleanly instead of leaving a dead MTP interface attached.
+on post-fs
+    mkdir /config/usb_gadget/g1/functions/ffs.mtp 0770 shell shell
+    mkdir /dev/usb-ffs 0770 shell shell
+    mkdir /dev/usb-ffs/mtp 0770 system system
+    mount functionfs mtp /dev/usb-ffs/mtp rmode=0770,fmode=0660,uid=1000,gid=1000
+
+    # Read by the FFS MTP handle before it services transfers. batchcancel=1
+    # lets the kernel reclaim cancelled requests instead of stalling the queue;
+    # device_type 3 identifies the interface as MTP so the host enumerates a
+    # portable-device node rather than a generic USB device.
+    setprop sys.usb.mtp.batchcancel 1
+    setprop sys.usb.mtp.device_type 3
+
+# ---------------------------------------------------------------------------
+# MTP binding
+# ---------------------------------------------------------------------------
+# PartitionManager::Enable_MTP() drives the link up in exactly this order
+# (partitionmanager.cpp:3503+):
+#     property_set("sys.usb.config", "none")      -> upstream "=none" handler
+#     property_set("sys.usb.config", "mtp,adb")
+#     new twrpMtp(...) ; mtp->forkserver(mtppipe) -> server writes descriptors
+# The upstream "none" handler unbinds the UDC, stops adbd and unlinks
+# configs/b.1/f1. That is safe: only f1 is removed, while functions/ffs.mtp
+# survives as a directory in the gadget.
+#
+# Two bind handlers are required because adbd and the MTP server become ready at
+# different times, and Enable_MTP() sets sys.usb.config BEFORE it forks the
+# server. Binding the UDC as soon as `mtp,adb` appears would publish an endpoint
+# set the server has not written yet, so:
+#   * the `mtp,adb` handler only re-starts adbd, which publishes
+#     sys.usb.ffs.ready once it has written its own descriptors;
+#   * the first bind waits on sys.usb.ffs.mtp.ready, which MtpDescriptors.cpp:280
+#     raises after the interface/endpoint descriptors and strings are written;
+#   * the second, more specific bind adds ffs.adb as f2 once adbd is ready too.
+# If adbd never reports ready, the first handler still leaves a working MTP link
+# instead of no link at all.
+on property:sys.usb.config=mtp,adb && property:sys.usb.configfs=1
+    start adbd
+
+on property:sys.usb.ffs.mtp.ready=1 && property:sys.usb.config=mtp,adb && property:sys.usb.configfs=1
+    write /config/usb_gadget/g1/UDC none
+    rm /config/usb_gadget/g1/configs/b.1/f1
+    rm /config/usb_gadget/g1/configs/b.1/f2
+    write /config/usb_gadget/g1/idVendor 0x18D1
+    write /config/usb_gadget/g1/idProduct 0x4EE2
+    write /config/usb_gadget/g1/configs/b.1/strings/0x409/configuration "mtp"
+    symlink /config/usb_gadget/g1/functions/ffs.mtp /config/usb_gadget/g1/configs/b.1/f1
+    write /config/usb_gadget/g1/UDC ${sys.usb.controller}
+    setprop sys.usb.state ${sys.usb.config}
+
+# Both interfaces ready: expose MTP as f1 and adb as f2.
+on property:sys.usb.ffs.ready=1 && property:sys.usb.ffs.mtp.ready=1 && property:sys.usb.config=mtp,adb && property:sys.usb.configfs=1
+    write /config/usb_gadget/g1/UDC none
+    rm /config/usb_gadget/g1/configs/b.1/f1
+    rm /config/usb_gadget/g1/configs/b.1/f2
+    write /config/usb_gadget/g1/idVendor 0x18D1
+    write /config/usb_gadget/g1/idProduct 0x4EE2
+    write /config/usb_gadget/g1/configs/b.1/strings/0x409/configuration "mtp_adb"
+    symlink /config/usb_gadget/g1/functions/ffs.mtp /config/usb_gadget/g1/configs/b.1/f1
+    symlink /config/usb_gadget/g1/functions/ffs.adb /config/usb_gadget/g1/configs/b.1/f2
+    write /config/usb_gadget/g1/UDC ${sys.usb.controller}
+    setprop sys.usb.state ${sys.usb.config}
+
+# MTP without the adb interface, for callers that set the bare config name.
+on property:sys.usb.ffs.mtp.ready=1 && property:sys.usb.config=mtp && property:sys.usb.configfs=1
+    write /config/usb_gadget/g1/UDC none
+    rm /config/usb_gadget/g1/configs/b.1/f1
+    rm /config/usb_gadget/g1/configs/b.1/f2
+    write /config/usb_gadget/g1/idVendor 0x18D1
+    write /config/usb_gadget/g1/idProduct 0x4EE2
+    write /config/usb_gadget/g1/configs/b.1/strings/0x409/configuration "mtp"
+    symlink /config/usb_gadget/g1/functions/ffs.mtp /config/usb_gadget/g1/configs/b.1/f1
+    write /config/usb_gadget/g1/UDC ${sys.usb.controller}
+    setprop sys.usb.state ${sys.usb.config}
+
+# Disable_MTP() clears mtp.ready at partitionmanager.cpp:3573 before it returns
+# the link to plain "adb", so the next Enable_MTP() observes a clean 0 -> 1
+# transition and re-fires the bind above. The rm keeps a stale f2 from surviving
+# a transition that never reached the two-interface handler.
+on property:sys.usb.config=none && property:sys.usb.configfs=1
+    setprop sys.usb.ffs.mtp.ready 0
+    rm /config/usb_gadget/g1/configs/b.1/f2

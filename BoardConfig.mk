@@ -137,10 +137,28 @@ AERA_EXTRA_LANGUAGES := true
 # ATS offsets under /data/vendor/time. kalama is absent from the auto-list.
 # Use upstream RTC + ATS logic; never pin an offset to a host/build date.
 TARGET_RECOVERY_QCOM_RTC_FIX := true
+# The device owns recovery/root/init.recovery.usb.rc, so the legacy
+# /sys/class/android_usb/android0 actions in TWRP etc/init.recovery.usb.rc must
+# stay excluded. This kernel has no android0 gadget: ro.boot.usbcontroller is
+# a600000.dwc3 and sys.usb.configfs=1, so the legacy writes would silently fail
+# and the MTP handlers below would never run.
 AERA_EXCLUDE_DEFAULT_USB_INIT := true
-# MTP is staged separately after AERA GUI/crypto baseline verification.
-# Its FunctionFS configuration and runtime path need independent verification.
-AERA_EXCLUDE_MTP := true
+
+# MTP is NOT excluded. This knob is only half of what MTP needs:
+#   * leaving AERA_EXCLUDE_MTP unset keeps TW_EXCLUDE_MTP empty, which is what
+#     makes Android.mk pass -DTW_HAS_MTP and link libtwrpmtp-ffs.so;
+#   * the FunctionFS node, the /dev/usb-ffs/mtp mount and the configfs bind
+#     handlers that expose ffs.mtp to the host live in
+#     recovery/root/init.recovery.usb.rc.
+# Excluding it here would instead compile out the whole MTP path: without
+# TW_HAS_MTP, TWPartitionManager::Enable_MTP() returns
+# gui_err("no_mtp=MTP support not included").
+#
+# MTP additionally requires AERA_ADVANCED_SECURITY to stay unset. That knob maps
+# to OF_ADVANCED_SECURITY, and twrp.cpp:317-321 turns it into
+# tw_mtp_enabled=0 plus a stopped adbd ("ADB & MTP disabled by maintainer")
+# before the autostart block at twrp.cpp:322-343 is even reached, so no configfs
+# work below can bring MTP back at runtime. See vendorsetup.sh.
 AERA_EXCLUDE_APEX := true
 # XML is only needed by QSEE; package its supported AOSP vendor variant.
 AERA_EXCLUDE_LIBXML2 := true

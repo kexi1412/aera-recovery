@@ -16,5 +16,15 @@ system_dlkm /system_dlkm ext4 ro wait,slotselect,logical,backup=1,wipeingui=0,ca
 /dev/block/by-name/super /super emmc defaults backup=0,flashimg=0
 /dev/block/by-name/misc /misc emmc defaults backup=0,flashimg=0
 /dev/block/by-name/metadata /metadata f2fs noatime,nosuid,nodev,discard wait,backup=0,wipeingui=0,canbewiped=0
+# persist is a standalone ext4 partition (/dev/block/sda2) holding WLAN
+# calibration: wlan/WCNSS_qcom_cfg.ini, which qca_cld3_kiwi_v2 loads by relative
+# name through the ueventd firmware_directories list, plus the per-chip BDF
+# copies under copy/. It is also where the vendor tree keeps sensor, camera and
+# fingerprint calibration, so it is never a backup or wipe candidate.
+# The mount itself is done from init.recovery.wifi.rc on post-fs so that the file
+# is present before the driver is asked for its config; this entry exists so the
+# partition is known to the recovery binary and cannot be offered as a wipe
+# target.
+/dev/block/by-name/persist /mnt/vendor/persist ext4 noatime,nosuid,nodev,barrier=1 wait,backup=0,wipeingui=0,canbewiped=0
 /dev/block/by-name/userdata /data f2fs noatime,nosuid,nodev,discard,reserve_root=32768,resgid=1065,fsync_mode=nobarrier,inlinecrypt latemount,resize,wait,check,fileencryption=aes-256-xts:aes-256-cts:v2+inlinecrypt_optimized+wrappedkey_v0,keydirectory=/metadata/vold/metadata_encryption,metadata_encryption=aes-256-xts:wrappedkey_v0,quota,reservedsize=128M,sysfs_path=/sys/devices/platform/soc/1d84000.ufshc,checkpoint=fs,fscompress,backup=1,wipeingui=0,canbewiped=0
 /devices/platform/soc/a600000.ssusb/* /usb-otg auto defaults removable,storage,backup=0,wipeingui=0
