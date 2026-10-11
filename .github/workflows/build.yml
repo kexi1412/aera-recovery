@@ -68,48 +68,112 @@ jobs:
       - name: Pick the build volume
         id: vol
         run: |
-          # The AOSP tree plus out/ needs well over 60G. The runner's / is an
-          # ~84G volume that still has little free space after the image, while
-          # /mnt is a separate, nearly empty volume. Hardcoding /mnt would be a
-          # guess, so measure both and pick the larger - and require the mount
-          # to accept execution, because a noexec volume would only surface
-          # later as a baffling compiler error.
+          # The AOSP tree plus out/ needs well over 60G, and run 38100739430
+          # died at ~1h03m with "No space left on device" while the runner agent
+          # wrote its own diagnostic log - the root volume was full.
+          # AERA_ENABLE_WLAN had just pulled in wpa_supplicant_8, rclone's Go
+          # build, libfuse and dhcptool, which were the last few GB.
           #
-          # /home is compared instead of / because it lives on the root volume
-          # and is writable without sudo, which keeps the probe honest.
-          #
-          # Context: run 38100739430 built in $GITHUB_WORKSPACE on / and died at
-          # ~1h03m with "No space left on device" while the runner agent was
-          # writing its own diagnostic log - the root volume was full.
-          best=""
-          best_avail=0
-          for cand in /home /mnt; do
-            [ -d "$cand" ] || continue
-            avail=$(df -Pk "$cand" | awk 'NR==2 {print $4}')
-            probe=$(mktemp -d "$cand/.execprobe.XXXXXX" 2>/dev/null) || {
-              echo "$cand: cannot create files, skipping"; continue; }
-            if printf '#!/bin/sh\nexit 0\n' > "$probe/t.sh" &&
-               chmod +x "$probe/t.sh" && "$probe/t.sh"; then
-              echo "$cand: $((avail/1024/1024))GiB free, exec ok"
+          # So build somewhere roomier. Three rules, learned the hard way:
+          #   1. probe with sudo - /mnt and /home are root-owned mode 755, so
+          #      mktemp as the runner user fails and every candidate is skipped.
+          #      That is exactly what killed run 38106600296 in 0s.
+          #   2. send diagnostics to stderr - anything on stdout is captured by
+          #      $(...) and turns a numeric comparison into a syntax error.
+          #   3. never fail the job here. If no candidate wins, fall back to the
+          #      workspace and let the build itself report the problem. Actions
+          #      runs this step as `bash -e`, so -e must be turned OFF first:
+          #      otherwise any unexpected non-zero aborts the job outright.
+          set +e
+          set -u
+
+          note() { echo "$@" >&2; }
+          probe() {
+            cand="$1"
+            [ -d "$cand" ] || { note "$cand: absent"; return 1; }
+            avail=$(df -Pk "$cand" 2>/dev/null | awk 'NR==2 {print $4}')
+            case "$avail" in ''|*[!0-9]*) note "$cand: df unusable"; return 1;; esac
+
+            # Returns 0 when a freshly written script on $cand actually runs.
+            try_exec() {
+              d=$(sudo mktemp -d "$cand/.execprobe.XXXXXX" 2>/dev/null) || return 1
+              sudo chown "$(id -u):$(id -g)" "$d" 2>/dev/null || true
+              printf '#!/bin/sh\nexit 0\n' > "$d/t.sh" 2>/dev/null || true
+              chmod +x "$d/t.sh" 2>/dev/null || true
+              "$d/t.sh" 2>/dev/null
+              rc=$?
+              sudo rm -rf "$d" 2>/dev/null || true
+              return $rc
+            }
+
+            if try_exec; then
+              exec_ok=yes
             else
-              echo "$cand: $((avail/1024/1024))GiB free, EXEC DENIED - skipping"
-              rm -rf "$probe"; continue
+              # A noexec volume would only surface much later as a baffling
+              # compiler error. Try to repair it rather than give up, since
+              # this is the one mount that actually has room.
+              note "$cand: not executable; attempting remount with exec"
+              sudo mount -o remount,exec "$cand" 2>/dev/null || true
+              if try_exec; then
+                exec_ok=yes; note "$cand: remount worked, exec=yes"
+              else
+                exec_ok=no;  note "$cand: still not executable, refusing"
+              fi
             fi
-            rm -rf "$probe"
-            if [ "$avail" -gt "$best_avail" ]; then
-              best_avail=$avail; best=$cand
+
+            note "$cand: $((avail/1024/1024))GiB free, exec=$exec_ok"
+            [ "$exec_ok" = yes ] || return 1
+            printf '%s' "$avail"
+          }
+
+          echo "=== candidate volumes ==="
+          df -h
+          root_avail=$(df -Pk / 2>/dev/null | awk 'NR==2 {print $4}')
+          case "$root_avail" in ''|*[!0-9]*) root_avail=0;; esac
+          note "root (/): $((root_avail/1024/1024))GiB free"
+
+          best=""
+          other=""
+          for cand in /mnt /home; do
+            if cand_avail=$(probe "$cand"); then
+              # Only accept a volume that is genuinely roomier than root;
+              # /home sits on root, so this also rules it out when nothing
+              # separate is mounted.
+              if [ -z "$best" ] && [ "$cand_avail" -gt "$root_avail" ]; then
+                best="$cand"; note "-> choosing $cand"
+              elif [ -z "$other" ]; then
+                # Keep a runner-up for the swapfile. Putting swap on the build
+                # volume would have it compete with the tree for the same 60G.
+                other="$cand"
+              fi
             fi
           done
-          if [ -z "$best" ]; then
-            echo "no usable volume found"; exit 1
+
+          if [ -n "$best" ]; then
+            work="$best/aera-build"
+            sudo mkdir -p "$work"
+            sudo chown -R "$(id -u):$(id -g)" "$work"
+          else
+            note "::warning::no volume beat root; building in the workspace"
+            work="$GITHUB_WORKSPACE/aera-build"
+            mkdir -p "$work"
           fi
-          work="$best/aera-build"
-          sudo mkdir -p "$work"
-          sudo chown -R "$(id -u):$(id -g)" "$work"
-          echo "root=$best" >> "$GITHUB_OUTPUT"
-          echo "work=$work" >> "$GITHUB_OUTPUT"
-          echo "=== building in $work ==="
-          df -h "$best"
+          mkdir -p "$work/tmp"
+
+          # Swap goes on any volume the build is not using.
+          swap_root="${other:-/home}"
+          if [ "$swap_root" = "$best" ]; then swap_root=/home; fi
+
+          {
+            echo "root=${best:-/home}"
+            echo "work=$work"
+            echo "swap_root=$swap_root"
+          } >> "$GITHUB_OUTPUT"
+          echo "=== building in $work (swap on $swap_root) ===" | tee /dev/stderr
+          df -h "$work" || df -h
+          # Always succeed. The volume choice is an optimisation; a wrong guess
+          # must never be the reason no image exists.
+          exit 0
 
       - name: Set up build environment
         run: |
@@ -149,15 +213,47 @@ jobs:
 
       - name: Add swap
         run: |
-          # Keep the swapfile on the build volume. On the default layout that
-          # moves 16G off the root volume, which is the one that ran out.
-          swap="${{ steps.vol.outputs.root }}/swapfile"
+          # Swap lives on whichever volume the build is NOT using, so 16G does
+          # not compete with the AOSP tree for the same space. Nothing here may
+          # fail the job: a missing swapfile only risks an OOM later, whereas
+          # exiting now guarantees no image at all.
+          swap_root="${{ steps.vol.outputs.swap_root }}"
+          swap="$swap_root/swapfile"
           sudo swapoff -a || true
-          sudo rm -f /swapfile "$swap"
-          sudo fallocate -l 16G "$swap" || sudo dd if=/dev/zero of="$swap" bs=1M count=16384
-          sudo chmod 600 "$swap"
-          sudo mkswap "$swap"
-          sudo swapon "$swap"
+          sudo rm -f /swapfile "$swap" || true
+
+          # Size the swapfile from what is actually free instead of hardcoding
+          # 16G. Committing 16G on a volume that later needs that space is how
+          # the volume filled up; never take more than a quarter of it and
+          # always leave 8G of headroom.
+          avail_k=$(df -Pk "$swap_root" 2>/dev/null | awk 'NR==2 {print $4}')
+          case "$avail_k" in ''|*[!0-9]*) avail_k=0;; esac
+          want_k=$(( 16 * 1024 * 1024 ))
+          quarter_k=$(( avail_k / 4 ))
+          head_k=$(( avail_k - 8*1024*1024 ))
+          # Written as if/else rather than `[ .. ] && x=..` on purpose: Actions
+          # runs run: blocks under `bash -e`, and a bare AND-list that
+          # short-circuits is a needless game of chicken with errexit.
+          if [ "$head_k" -lt 0 ]; then head_k=0; fi
+          if [ "$quarter_k" -lt "$head_k" ]; then cap_k=$quarter_k; else cap_k=$head_k; fi
+          if [ "$want_k" -gt "$cap_k" ]; then want_k=$cap_k; fi
+          want_mb=$(( want_k / 1024 ))
+          echo "swap: $swap_root has $((avail_k/1024/1024))GiB free -> requesting ${want_mb}MiB"
+
+          if [ "$want_mb" -ge 1024 ]; then
+            if ! sudo fallocate -l "${want_mb}M" "$swap" 2>/dev/null; then
+              sudo dd if=/dev/zero of="$swap" bs=1M count="$want_mb" 2>/dev/null || true
+            fi
+            if [ -s "$swap" ]; then
+              sudo chmod 600 "$swap"
+              sudo mkswap "$swap" >/dev/null 2>&1 || true
+              sudo swapon "$swap" 2>/dev/null || echo "::warning::swap could not be enabled"
+            else
+              echo "::warning::swapfile was not created"
+            fi
+          else
+            echo "::warning::too little room for a useful swapfile; continuing without swap"
+          fi
           free -h
           df -h
 
@@ -201,10 +297,33 @@ jobs:
           cd "${{ steps.vol.outputs.work }}/aera"
           export ALLOW_MISSING_DEPENDENCIES=true
           export LC_ALL=C
+          # Compiler scratch follows the build volume; /tmp lives on root, the
+          # volume that ran out.
+          export TMPDIR="${{ steps.vol.outputs.work }}/tmp"
+          mkdir -p "$TMPDIR"
+
+          # Record headroom up front. Run 38100739430 died at ~1h03m with
+          # "No space left on device" - this line is what proves, next time,
+          # whether the volume was already tight before compiling started.
+          avail=$(df -Pk . | awk 'NR==2 {print $4}')
+          echo "build volume free before compile: $((avail/1024/1024))GiB"
+          if [ "$avail" -lt $((20*1024*1024)) ]; then
+            echo "::warning::under 20GiB free; the build may run out of space"
+          fi
+
           source device/oneplus/astonc/vendorsetup.sh
           source build/envsetup.sh
           lunch twrp_astonc-bp2a-eng
-          mka adbd recoveryimage -j"$(nproc --all)" || mka adbd recoveryimage
+
+          # Cap parallelism. AOSP link steps peak in the multi-GB range and an
+          # OOM kill mid-build costs the whole run. Guarded with if/else rather
+          # than `[ .. ] &&` because of errexit.
+          jobs=$(nproc --all)
+          if [ "$jobs" -gt 4 ]; then jobs=4; fi
+          echo "building with -j$jobs"
+          mka adbd recoveryimage -j"$jobs" || mka adbd recoveryimage -j"$jobs"
+
+          df -h .
 
       - name: Show ccache stats
         if: always()
@@ -214,7 +333,18 @@ jobs:
         if: always()
         run: |
           df -h
-          du -sh "${{ steps.vol.outputs.work }}/aera/out" 2>/dev/null || true
+          aera="${{ steps.vol.outputs.work }}/aera"
+          # Report the two consumers separately. Without this the next failure
+          # is another guess about where the space went: .repo is git objects
+          # for the whole manifest, out/ is compiler output.
+          du -sh "$aera/.repo" 2>/dev/null || true
+          du -sh "$aera/out" 2>/dev/null || true
+          du -sh "$aera" 2>/dev/null || true
+          echo "--- largest directories under out/ ---"
+          du -sh "$aera/out"/* 2>/dev/null | sort -rh | head -5 || true
+          echo "--- recovery image ---"
+          ls -l "$aera/out/target/product/astonc/recovery.img" 2>/dev/null || \
+            echo "no recovery.img"
 
       - name: Upload recovery image
         if: always()
