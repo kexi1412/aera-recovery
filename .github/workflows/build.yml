@@ -160,7 +160,10 @@ jobs:
           fi
           mkdir -p "$work/tmp"
 
-          # Swap goes on any volume the build is not using.
+          # Swap goes on any volume other than the build volume - but on
+          # ubuntu-22.04 /mnt and /home are both the root filesystem, so in
+          # practice this lands on root and competes with the build anyway.
+          # That is why the size below is capped at 8G rather than 16G.
           swap_root="${other:-/home}"
           if [ "$swap_root" = "$best" ]; then swap_root=/home; fi
 
@@ -223,12 +226,13 @@ jobs:
           sudo rm -f /swapfile "$swap" || true
 
           # Size the swapfile from what is actually free instead of hardcoding
-          # 16G. Committing 16G on a volume that later needs that space is how
-          # the volume filled up; never take more than a quarter of it and
-          # always leave 8G of headroom.
+          # 16G. This volume also has to hold the AOSP tree and out/, and
+          # fallocate reserves real blocks, so a fixed 16G is 16G genuinely
+          # gone. Cap at 8G: the runner has ~16G RAM and the compile runs -j4,
+          # so 8G is ample headroom.
           avail_k=$(df -Pk "$swap_root" 2>/dev/null | awk 'NR==2 {print $4}')
           case "$avail_k" in ''|*[!0-9]*) avail_k=0;; esac
-          want_k=$(( 16 * 1024 * 1024 ))
+          want_k=$(( 8 * 1024 * 1024 ))
           quarter_k=$(( avail_k / 4 ))
           head_k=$(( avail_k - 8*1024*1024 ))
           # Written as if/else rather than `[ .. ] && x=..` on purpose: Actions
@@ -265,6 +269,29 @@ jobs:
             -b aera-16.0 --git-lfs --depth=1
           repo sync -c --force-sync --no-clone-bundle --no-tags -j"$(nproc --all)"
           df -h
+
+      - name: Drop the repo object store
+        run: |
+          cd "${{ steps.vol.outputs.work }}/aera"
+          # On ubuntu-22.04 /mnt and /home share the root filesystem, so there
+          # is no second volume to escape to - the build must simply use less
+          # disk. .repo is the whole manifest's git object store and is pure
+          # overhead once the working trees exist: nothing in the build reads
+          # it. This is the single biggest reclaim available.
+          echo "--- before ---"
+          du -sh .repo 2>/dev/null || true
+          df -h .
+          rm -rf .repo
+          echo "--- after ---"
+          df -h .
+          # The only consumers of per-project git metadata are two cosmetic
+          # version strings (Android.mk:251 TW_GIT_REVISION, aera_build.mk:54
+          # OF_CURRENT_BRANCH). Both already tolerate a failure with
+          # 2>/dev/null, so a missing store degrades the version string and
+          # nothing else. Confirm that instead of assuming it.
+          git -C bootable/recovery rev-parse --short=8 HEAD 2>/dev/null \
+            && echo "note: per-project git still works" \
+            || echo "note: per-project git is gone; version string will be empty"
 
       - name: Install device tree
         run: |
