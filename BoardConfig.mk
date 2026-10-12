@@ -188,3 +188,96 @@ AERA_RECOVERY_ADDITIONAL_RELINK_LIBRARY_FILES += \
     $(TARGET_OUT_SHARED_LIBRARIES)/libion.so
 
 BOARD_VENDOR_SEPOLICY_DIRS += $(DEVICE_PATH)/sepolicy
+
+# ---------------------------------------------------------------------------
+# Kernel module loading (Wi-Fi / QCA6490)
+# ---------------------------------------------------------------------------
+# These are set HERE rather than only in aera_astonc.mk, and the reason is the
+# evaluation order of bootable/recovery/aera_config.mk.
+#
+# That file is the intended translation layer from the public AERA_* namespace
+# to the internal names the inherited recovery code consumes. Its mapper is an
+# immediate assignment behind an origin guard (aera_config.mk:7-11):
+#
+#     define aera-map-config
+#     ifneq ($$(origin AERA_$(1)),undefined)
+#     $(2) := $$(AERA_$(1))
+#     endef
+#
+# `:=` expands at parse time, so the AERA_* value must already be defined at the
+# moment aera_config.mk is read. That file is included from
+# build/make/core/config.mk, which has its own include order (envsetup.mk at
+# :419, the aera_config.mk include at :478), while device.mk -> aera_astonc.mk
+# is product configuration and is read at a different point. Whether the product
+# side is evaluated before :478 could NOT be verified in this environment - both
+# the GitHub fetch and a local clone of AERA-Recovery/android_build_make failed
+# here - so it is recorded as an open question, not as a proven defect.
+#
+# The previously shipped recovery.img does not settle it either: it was built at
+# 00:51 while the commit that first added a module list and the Wi-Fi init
+# scripts (5d614cd) is timestamped 08:24, so it predates the configuration being
+# discussed. Its ramdisk has no wpa_supplicant, no dhcptool, no
+# init.recovery.wifi.rc and no ffs.mtp, and its binary has none of the loader's
+# strings - all consistent with it simply being an older build, and therefore
+# not usable as evidence about aera_config.mk.
+#
+# Setting the internal names here is correct whichever way that ordering
+# resolves, and that is the argument for it:
+#   * BoardConfig.mk is read during board configuration, and every Android.mk is
+#     parsed after config.mk has finished, so these values are unconditionally
+#     in scope for the loader gate at bootable/recovery/Android.mk:362
+#       ifneq ($(strip $(TW_LOAD_VENDOR_MODULES) $(TW_POST_DECRYPT_MODULES)),)
+#     and for the Wi-Fi gate at Android.mk:72. If the AERA_* mapping does work,
+#     these assignments agree with it and change nothing.
+#   * The reference tree for this platform does the same thing -
+#     twrp_device_oplus_sm8550 BoardConfig.mk:237-238 sets
+#     TW_LOAD_VENDOR_MODULES and TW_LOAD_VENDOR_MODULES_EXCLUDE_GKI in
+#     BoardConfig.mk, with the same double quoting - so this is the established
+#     shape for the platform rather than a local invention.
+#
+# The quotes matter and must be kept: LOCAL_CFLAGS carries
+# -DTW_LOAD_VENDOR_MODULES="cfg80211.ko ..." as a single shell word, the
+# preprocessor defines it as a token sequence, and
+# twcommon.h:38 STRINGIFY(...) `#__VA_ARGS__` then stringifies the whole
+# sequence into one literal that TWFunc::split_string splits on spaces.
+# Without the quotes only the first module would survive.
+#
+# Module set: the QCA6490 (kiwi_v2) stack, ordered so that dependencies are
+# resolvable. cfg80211 and mac80211 first, then the CNSS service layer, then the
+# PCIe host driver and finally the chip driver.
+TW_LOAD_VENDOR_MODULES := "cfg80211.ko mac80211.ko cnss_prealloc.ko cnss_utils.ko cnss_plat_ipc_qmi_svc.ko wlan_firmware_service.ko cnss_nl.ko cnss2.ko qca_cld3_kiwi_v2.ko"
+
+# Must be the literal string true, not 1: Android.mk:370 tests it with
+# ifeq ($(TW_LOAD_VENDOR_MODULES_EXCLUDE_GKI),true). It drops the
+# /lib/modules/<major>.<minor>-gki directory from the search list, because the
+# GKI modules for that path are the stock kernel's and must not shadow the
+# vendor copies that match this device's kernel.
+TW_LOAD_VENDOR_MODULES_EXCLUDE_GKI := true
+
+# Wi-Fi backend and UI. Must be the literal 1, not true: Android.mk:72 and
+# aera_build.mk:885 both compare it with ifeq against 1. With it set, wlan.cpp,
+# aera_wifi_dispatcher.cpp, aera_supplicant_link.cpp and aera_adbd.cpp are
+# compiled and wpa_supplicant, wpa_cli and dhcptool are staged into the ramdisk,
+# which is what init.recovery.wifi.rc:159 runs as a service. aera_build.mk also
+# hard-errors when external/wpa_supplicant_8 is absent; the AERA manifest
+# provides it, so that error does not fire here.
+OF_ENABLE_WLAN := 1
+
+# Deliberately NOT set:
+#   TW_LOAD_VENDOR_BOOT_MODULES - compiles in the /lib/modules pass at
+#     kernel_module_loader.cpp:317. /lib/modules is the vendor_boot platform
+#     ramdisk and, per config/kernel-modules.json, holds 450 modules totalling
+#     67,991,336 B of which only cfg80211.ko and mac80211.ko are on the list
+#     above. Try_And_Load_Modules() copies the whole directory into /tmp
+#     (Copy_Modules_To_Tmpfs does not consult the requested list) and /tmp is
+#     tmpfs, so the pass would spend ~65 MiB of RAM to load two modules that
+#     recovery/root/system/bin/beforemodules.sh already insmods from the same
+#     directory at no copy cost.
+#   TW_LOAD_PREBUILT_MODULES_AT_FIRST - vendor_prebuilt modules are not shipped
+#     in this ramdisk; BOARD_RECOVERYIMAGE_PARTITION_SIZE is a 100 MiB cap and
+#     the .ko set is deliberately left out of it.
+#   TW_POST_DECRYPT_MODULES - the /system_dlkm and post-decrypt staging path is
+#     for FBE keys and this device stages nothing there. Setting it would also
+#     make Android.mk:381 emit -DTW_POST_DECRYPT_MODULES, and
+#     Stage_Post_Decrypt_Modules() has no work to do.
+

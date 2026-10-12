@@ -229,6 +229,37 @@ jobs:
 
       - name: Add swap
         run: |
+          # systemd-oomd is the single most likely cause of the silent death in
+          # run 38134563574, and it costs nothing to remove.
+          #
+          # That run reached 99% 130/131 of the Go bootstrap, printed nothing
+          # for 337 seconds while soong_build analysed the tree - the most
+          # memory-hungry phase of an AOSP build - and then died with
+          # "Process completed with exit code 143" (SIGTERM) plus "The runner
+          # has received a shutdown signal. This can happen when the runner
+          # service is stopped". Disk was not the problem: 51GiB free before
+          # compiling, 52G free when it started.
+          #
+          # The runner reported 15.6GB of RAM against AOSP's stated 16GB
+          # minimum, and Ubuntu 22.04 enables systemd-oomd, which kills a whole
+          # user slice when its memory pressure crosses a threshold. The GitHub
+          # runner agent runs inside exactly such a slice, so an OOM reaper
+          # shooting the agent is indistinguishable from a service stop: the
+          # agent's own shutdown path is what prints that SIGTERM message.
+          #
+          # Steps 16-19 were skipped despite `if: always()`, which confirms the
+          # kill came from outside the job - no step can run once the runner
+          # agent itself is gone.
+          sudo systemctl stop systemd-oomd systemd-oomd.socket 2>/dev/null || true
+          sudo systemctl disable systemd-oomd systemd-oomd.socket 2>/dev/null || true
+          if systemctl is-active --quiet systemd-oomd 2>/dev/null; then
+            echo "::warning::systemd-oomd is still active; memory pressure may kill the runner"
+          else
+            echo "systemd-oomd stopped (or absent)"
+          fi
+          # Report the exact knob that remains, so the next run can be compared.
+          cat /proc/pressure/memory 2>/dev/null || echo "no PSI memory pressure support"
+
           # Swap lives on whichever volume the build is NOT using, so 16G does
           # not compete with the AOSP tree for the same space. Nothing here may
           # fail the job: a missing swapfile only risks an OOM later, whereas
@@ -314,6 +345,121 @@ jobs:
           cp -a "$GITHUB_WORKSPACE/device_tree" device/oneplus/astonc
           rm -rf device/oneplus/astonc/.github device/oneplus/astonc/.git
           ls device/oneplus/astonc
+
+      - name: Verify kernel module configuration
+        run: |
+          # The Wi-Fi stack cannot come up unless kernel_module_loader.cpp is
+          # compiled into the recovery binary, and whether it is compiled is
+          # decided by make variables that are easy to lose silently. This step
+          # fails the run before an hour of compiling when the configuration
+          # that enables it has drifted.
+          #
+          # Why this is a checked invariant and not a comment: the build
+          # succeeds and produces a plausible recovery image whether or not the
+          # loader is compiled in, so nothing short of an explicit check catches
+          # a lost variable. The module list reaches the compiler only through
+          # BoardConfig.mk, because the AERA_* -> TW_* mapping in
+          # bootable/recovery/aera_config.mk is an immediate assignment behind an
+          # origin guard (aera_config.mk:7-11) whose evaluation order relative to
+          # product configuration is not reliable.
+          dt="$GITHUB_WORKSPACE/device_tree"
+          bb="${{ steps.vol.outputs.work }}/aera"
+          bc="$dt/BoardConfig.mk"
+          fail=0
+
+          # 1. The gate variable itself. Android.mk:362 is
+          #    `ifneq ($(strip $(TW_LOAD_VENDOR_MODULES) $(TW_POST_DECRYPT_MODULES)),)`.
+          if ! grep -qE '^[[:space:]]*TW_LOAD_VENDOR_MODULES[[:space:]]*:?=' "$bc"; then
+            echo "::error::BoardConfig.mk does not set TW_LOAD_VENDOR_MODULES; kernel_module_loader.cpp will be compiled out and Wi-Fi cannot work"
+            fail=1
+          fi
+
+          # 2. Quotes. The value is passed through -D and then stringified by
+          #    twcommon.h EXPAND/STRINGIFY, which needs one token sequence.
+          #    Unquoted, only the first module survives.
+          if ! grep -qE '^[[:space:]]*TW_LOAD_VENDOR_MODULES[[:space:]]*:?=[[:space:]]*"' "$bc"; then
+            echo "::error::TW_LOAD_VENDOR_MODULES is not quoted; only the first module would be loaded"
+            fail=1
+          fi
+
+          # 3. Modules that carry the QCA6490 stack. cfg80211 and mac80211 are
+          #    the symbols everything else resolves against; cnss2 owns the PCIe
+          #    endpoint and qca_cld3_kiwi_v2 is the only chip driver that binds
+          #    this silicon (the non-_v2 kiwi refuses it).
+          for m in cfg80211.ko mac80211.ko cnss2.ko qca_cld3_kiwi_v2.ko; do
+            if ! grep -q "$m" "$bc"; then
+              echo "::error::TW_LOAD_VENDOR_MODULES does not list $m"
+              fail=1
+            fi
+          done
+
+          # 4. The GKI exclusion must be the literal `true` (Android.mk:370).
+          if ! grep -qE '^[[:space:]]*TW_LOAD_VENDOR_MODULES_EXCLUDE_GKI[[:space:]]*:?=[[:space:]]*true[[:space:]]*$' "$bc"; then
+            echo "::error::TW_LOAD_VENDOR_MODULES_EXCLUDE_GKI must be exactly 'true'"
+            fail=1
+          fi
+
+          # 5. The loader hook has to exist in the ramdisk, because the load
+          #    order it enforces is what makes the stack resolve.
+          if [ ! -f "$dt/recovery/root/system/bin/beforemodules.sh" ]; then
+            echo "::error::recovery/root/system/bin/beforemodules.sh is missing"
+            fail=1
+          fi
+
+          # 6. The Wi-Fi backend must be enabled with the literal 1.
+          #    bootable/recovery/Android.mk:72 and aera_build.mk:885 both compare
+          #    with `ifeq (...,1)`, so `true` compiles the Wi-Fi sources out just
+          #    as effectively as leaving it unset. Without this, wlan0 is brought
+          #    up by the modules but nothing ever starts the supplicant, which
+          #    presents as "Wi-Fi does not work" even with every .ko loaded.
+          if ! grep -qE '^[[:space:]]*OF_ENABLE_WLAN[[:space:]]*:?=[[:space:]]*1[[:space:]]*$' "$bc"; then
+            echo "::error::BoardConfig.mk does not set OF_ENABLE_WLAN to the literal 1; the Wi-Fi sources will not be compiled and no supplicant will be staged"
+            fail=1
+          fi
+
+          # 7. Upstream must still contain the hook call and the gate the fix
+          #    relies on. If AERA renames them, the fix has to be re-derived
+          #    rather than silently doing nothing.
+          if ! grep -q 'beforemodules.sh' "$bb/bootable/recovery/kernel_module_loader.cpp"; then
+            echo "::error::kernel_module_loader.cpp no longer calls /system/bin/beforemodules.sh; the ramdisk hook is dead code"
+            fail=1
+          fi
+          if ! grep -q 'TW_LOAD_VENDOR_MODULES' "$bb/bootable/recovery/Android.mk"; then
+            echo "::error::bootable/recovery/Android.mk no longer gates on TW_LOAD_VENDOR_MODULES"
+            fail=1
+          fi
+          if ! grep -qE 'ifeq[[:space:]]*\(\$\(OF_ENABLE_WLAN\),1\)' "$bb/bootable/recovery/aera_build.mk"; then
+            echo "::error::aera_build.mk no longer gates the Wi-Fi targets on OF_ENABLE_WLAN==1"
+            fail=1
+          fi
+
+          # 8. The list in aera_astonc.mk and the list in BoardConfig.mk must
+          #    agree. Two declarations of one truth drift silently otherwise, and
+          #    the AERA_* one is the value a reader would trust.
+          aera_list=$(grep -oE '^AERA_LOAD_VENDOR_MODULES[[:space:]]*:?=[[:space:]]*"[^"]*"' "$dt/aera_astonc.mk" | sed 's/.*"\(.*\)"/\1/' | tr ' ' '\n' | sort | tr '\n' ' ')
+          bc_list=$(grep -oE '^TW_LOAD_VENDOR_MODULES[[:space:]]*:?=[[:space:]]*"[^"]*"' "$bc" | sed 's/.*"\(.*\)"/\1/' | tr ' ' '\n' | sort | tr '\n' ' ')
+          if [ -z "$aera_list" ]; then
+            echo "::error::aera_astonc.mk does not declare AERA_LOAD_VENDOR_MODULES; the public interface has been dropped"
+            fail=1
+          elif [ "$aera_list" != "$bc_list" ]; then
+            echo "::error::AERA_LOAD_VENDOR_MODULES and TW_LOAD_VENDOR_MODULES disagree"
+            echo "::error::  aera_astonc.mk : $aera_list"
+            echo "::error::  BoardConfig.mk : $bc_list"
+            fail=1
+          fi
+
+          # 9. Report what will actually be compiled, so the values are in the
+          #    log even when the check passes.
+          echo "--- module configuration as it will be consumed ---"
+          grep -nE '^[[:space:]]*(TW_LOAD_(VENDOR_MODULES|VENDOR_MODULES_EXCLUDE_GKI|VENDOR_BOOT_MODULES|PREBUILT_MODULES_AT_FIRST)|OF_ENABLE_WLAN)' "$bc" || true
+          echo "--- declared module count ---"
+          printf '%s' "$bc_list" | wc -w
+
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::kernel module configuration is inconsistent; refusing to start a multi-hour build"
+            exit 1
+          fi
+          echo "kernel module configuration OK"
 
       - name: Apply upstream source fixes
         run: |
@@ -419,22 +565,35 @@ jobs:
           # only thing that survives that, so it has to carry the evidence.
           #
           # Free memory is reported for the same reason. That run announced
-          # "You are building on a machine with 15.6GB of RAM" while AOSP asks
-          # for 16GB, so memory exhaustion is the leading explanation for a
-          # SIGTERM whose only symptom is silence; the OOM killer's own message
-          # goes to dmesg, which never reaches this log.
+          # "You are building on a machine with 15.6GB of RAM" against AOSP's
+          # stated 16GB minimum, so an OOM kill is one candidate. The kernel
+          # only says so in dmesg, which never reaches this log once the runner
+          # agent is gone - but the heartbeat's own stdout is streamed
+          # continuously, so anything printed here survives the kill. Hence
+          # dmesg is folded into the same loop: if the OOM killer fires, the
+          # reason appears in this output a moment before the runner dies.
           (
             start=$(date +%s)
+            seen_oom=""
             while :; do
               printf '[%s] ' "$(date +%H:%M:%S)" >> "$disklog"
               df -Ph . 2>/dev/null | awk 'NR==2 {print $4" avail, "$3" used, "$5" ("$2" size)"}' >> "$disklog"
               elapsed=$(( $(date +%s) - start ))
               last=$(tail -n 1 "$log" 2>/dev/null | tr -d '\r' | cut -c1-140)
-              printf 'heartbeat %dm%02ds | disk %s | mem avail %s | last: %s\n' \
+              printf 'heartbeat %dm%02ds | disk %s | mem avail %s | swap used %s | last: %s\n' \
                 $((elapsed / 60)) $((elapsed % 60)) \
                 "$(df -Ph . 2>/dev/null | awk 'NR==2 {print $4}')" \
                 "$(free -m 2>/dev/null | awk '/^Mem:/ {print $7"MB"}')" \
+                "$(free -m 2>/dev/null | awk '/^Swap:/ {print $3"MB"}')" \
                 "$last"
+              # Only shout when something new appears, so the output does not
+              # fill with the same line every two minutes.
+              oom=$(sudo dmesg 2>/dev/null | grep -iE 'out of memory|oom-kill|killed process' | tail -3)
+              if [ -n "$oom" ] && [ "$oom" != "$seen_oom" ]; then
+                seen_oom="$oom"
+                echo "=== kernel OOM evidence ==="
+                printf '%s\n' "$oom"
+              fi
               sleep 120
             done
           ) &
@@ -495,6 +654,108 @@ jobs:
           df -h . | tee -a "$log"
           ls -l out/target/product/astonc/recovery.img 2>/dev/null | tee -a "$log" || true
           exit "$rc"
+
+      - name: Verify the recovery binary really contains the module loader
+        if: always()
+        run: |
+          # The strongest available check, and the one that would have caught
+          # the original defect on its own: read the produced binary and look
+          # for the loader's own string literals. Configuration can be wrong in
+          # ways static checks miss (a later include overwriting the value, an
+          # ifdef elsewhere in the chain), and a build that emits a plausible
+          # recovery.img while silently omitting the module loader is exactly
+          # the failure this project shipped once already.
+          bin="${{ steps.vol.outputs.work }}/aera/out/target/product/astonc/system/bin/recovery"
+          if [ ! -f "$bin" ]; then
+            bin="${{ steps.vol.outputs.work }}/aera/out/target/product/astonc/recovery/root/system/bin/recovery"
+          fi
+          if [ ! -f "$bin" ]; then
+            echo "::error::recovery binary not found; cannot verify the module loader"
+            ls -l "${{ steps.vol.outputs.work }}/aera/out/target/product/astonc/" 2>/dev/null || true
+            exit 1
+          fi
+          echo "verifying $bin ($(stat -c%s "$bin") bytes)"
+
+          # Control: prove the strings scan itself works before trusting a
+          # negative result. An earlier draft used `^recovery$` and a threshold
+          # of 10, which the known-good reference binary fails (it has exactly
+          # one such line) - that would have failed every valid build. The
+          # measured values on a real recovery binary are: 46159 strings lines,
+          # "recovery" 167x, "vendor" 56x, "AERA" 301x. The checks below are on
+          # that measured footing.
+          if [ "$(head -c4 "$bin" | od -An -tx1 | tr -d ' \n')" != "7f454c46" ]; then
+            echo "::error::recovery is not an ELF file"
+            exit 1
+          fi
+          nstrings=$(strings -a "$bin" | wc -l)
+          control=$(strings -a "$bin" | grep -c 'recovery' || true)
+          echo "strings lines: $nstrings, 'recovery' occurrences: $control"
+          if [ "$nstrings" -lt 5000 ] || [ "$control" -lt 20 ]; then
+            echo "::error::control strings missing; the strings scan is unreliable, not the binary"
+            exit 1
+          fi
+
+          fail=0
+          check() {
+            if strings -a "$bin" | grep -qF -- "$1"; then
+              echo "  found: $1"
+            else
+              echo "::error::missing from recovery binary: $1"
+              fail=1
+            fi
+          }
+
+          echo "--- module loader ---"
+          check "Attempting to load modules"
+          check "Checking directory: "
+          check "Modules Loaded: "
+          check "modules.load.twrp"
+          check "/vendor/lib/modules"
+          check "/vendor_dlkm/lib/modules"
+
+          echo "--- requested module names ---"
+          for m in cfg80211.ko mac80211.ko cnss2.ko qca_cld3_kiwi_v2.ko cnss_plat_ipc_qmi_svc.ko; do
+            check "$m"
+          done
+
+          echo "--- wlan.cpp / supplicant path ---"
+          check "wpa_supplicant"
+          check "sys.aera.wlan.up"
+
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::the recovery binary was built without the kernel module loader or the Wi-Fi stack; the resulting image cannot bring up wlan0"
+            exit 1
+          fi
+          echo "recovery binary contains the module loader and the Wi-Fi stack"
+
+      - name: Verify the ramdisk stages the module hook
+        if: always()
+        run: |
+          # The device-tree copy is the other half: the binary must call
+          # /system/bin/beforemodules.sh and the ramdisk must contain it. The
+          # loader treats a missing hook as a no-op, so this cannot be left to
+          # a runtime symptom.
+          root="${{ steps.vol.outputs.work }}/aera/out/target/product/astonc/recovery/root"
+          hook="$root/system/bin/beforemodules.sh"
+          if [ ! -d "$root" ]; then
+            echo "recovery ramdisk tree not found at $root; skipping"
+            exit 0
+          fi
+          if [ ! -f "$hook" ]; then
+            echo "::error::beforemodules.sh did not reach the recovery ramdisk at system/bin/"
+            echo "--- what is in system/bin/ ---"
+            ls -l "$root/system/bin/" 2>/dev/null || true
+            exit 1
+          fi
+          echo "staged: $hook ($(stat -c%s "$hook") bytes, mode $(stat -c%a "$hook"))"
+
+          # A CRLF shebang makes the script unrunnable on the device, and the
+          # failure is a bare "not found" that points nowhere near the cause.
+          if head -c2 "$hook" | grep -q $'\r' || grep -qU $'\r' "$hook"; then
+            echo "::error::beforemodules.sh contains CR characters; the shebang will not resolve on the device"
+            exit 1
+          fi
+          echo "no CR characters in the hook"
 
       - name: Show disk curve and build log tail
         if: always()

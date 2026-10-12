@@ -94,12 +94,69 @@ AERA_LOAD_VENDOR_MODULES_EXCLUDE_GKI := true
 # compiler argument: kernel_module_loader.cpp recovers it with
 # EXPAND()/STRINGIFY, and an unquoted list would make the compiler see the words
 # after the first as separate arguments.
-AERA_LOAD_VENDOR_MODULES := "cfg80211.ko mac80211.ko qca_cld3_kiwi_v2.ko cnss2.ko cnss_plat_ipc_qmi_svc.ko wlan_firmware_service.ko cnss_nl.ko cnss_prealloc.ko cnss_utils.ko"
+# This is the public AERA_* interface value. It is NOT what gates the build.
+#
+# The build is gated by TW_LOAD_VENDOR_MODULES, which bootable/recovery/
+# Android.mk:362 tests as
+#     ifneq ($(strip $(TW_LOAD_VENDOR_MODULES) $(TW_POST_DECRYPT_MODULES)),)
+# to decide whether kernel_module_loader.cpp is compiled at all.
+#
+# aera_config.mk is supposed to derive that name from this one, but its mapper
+# is an immediate assignment behind an origin guard (aera_config.mk:7-11):
+#     define aera-map-config
+#     ifneq ($$(origin AERA_$(1)),undefined)
+#     $(2) := $$(AERA_$(1))
+#     endef
+# and aera_config.mk is included from build/make/core/config.mk, whereas this
+# file is product configuration read at a different point in the same file's
+# include order. Whether this file has been evaluated by the time that include
+# runs could not be verified here (both the GitHub fetch and a local clone of
+# AERA-Recovery/android_build_make failed in this environment), so the mapping
+# must be treated as unreliable rather than assumed to work.
+#
+# Therefore BoardConfig.mk sets TW_LOAD_VENDOR_MODULES, TW_LOAD_VENDOR_MODULES_
+# EXCLUDE_GKI and OF_ENABLE_WLAN directly, which is immune to that ordering
+# because BoardConfig.mk is read during board configuration and every Android.mk
+# is parsed after config.mk completes. The values here remain the documented
+# public interface, and the AERA_LOAD_VENDOR_MODULES list is kept in sync with
+# BoardConfig.mk so the two cannot drift into disagreeing.
+#
+# Keep the quotes: the value reaches the compiler as
+# -DTW_LOAD_VENDOR_MODULES="cfg80211.ko ..." and twcommon.h:37-38
+# EXPAND()/STRINGIFY turns that into one literal which
+# TWFunc::split_string splits on spaces. Unquoted, only the first module would
+# survive.
+AERA_LOAD_VENDOR_MODULES := "cfg80211.ko mac80211.ko cnss_prealloc.ko cnss_utils.ko cnss_plat_ipc_qmi_svc.ko wlan_firmware_service.ko cnss_nl.ko cnss2.ko qca_cld3_kiwi_v2.ko"
+
+# The order above is deliberate: cfg80211 and mac80211 first, then the CNSS
+# service layer, then the PCIe host driver, then the chip driver. Loading cnss2
+# before its QMI providers fails with unresolved wlfw_*_ind_msg_v01_ei symbols.
+#
+# Deliberately NOT enabled:
+#   AERA_LOAD_VENDOR_BOOT_MODULES - maps to TW_LOAD_VENDOR_BOOT_MODULES and
+#     would compile in the /lib/modules pass at kernel_module_loader.cpp:317.
+#     That directory is the vendor_boot platform ramdisk and, per
+#     config/kernel-modules.json, holds 450 modules totalling 67,991,336 B of
+#     which only cfg80211.ko and mac80211.ko are on the list above.
+#     Try_And_Load_Modules() copies the whole directory into /tmp
+#     (Copy_Modules_To_Tmpfs does not consult the requested list) and /tmp is
+#     tmpfs, so the pass would spend ~65 MiB of RAM to load two modules that
+#     recovery/root/system/bin/beforemodules.sh already insmods from the same
+#     directory without copying anything.
+#   AERA_LOAD_PREBUILT_MODULES_AT_FIRST - prebuilt vendor modules are not in this
+#     ramdisk; BOARD_RECOVERYIMAGE_PARTITION_SIZE is a 100 MiB cap and the .ko
+#     set is deliberately excluded from it.
+#
+# What actually makes the modules load is recovery/root/system/bin/
+# beforemodules.sh, which kernel_module_loader.cpp:301 runs before it resolves
+# any module directory. See that file for why libmodprobe alone is not enough.
 
 # Wi-Fi UI and backend. wlan.cpp / aera_wifi_dispatcher.cpp /
 # aera_supplicant_link.cpp / aera_adbd.cpp / aera_secrets / nas/NasManager.cpp
-# are only compiled when OF_ENABLE_WLAN == 1, and aera_build.mk tests
-# `ifeq ($(OF_ENABLE_WLAN),1)`, so the value must be literally 1.
+# are only compiled when OF_ENABLE_WLAN == 1, and aera_build.mk:885 tests
+# `ifeq ($(OF_ENABLE_WLAN),1)`, so the value must be literally 1 - not true.
+# BoardConfig.mk sets OF_ENABLE_WLAN for that reason, using the same mapping
+# this line feeds; it is kept here as the public interface value.
 #
 # Enabling this also makes aera_build.mk require external/wpa_supplicant_8 (it
 # hard-errors if absent; the AERA manifest provides it) and adds

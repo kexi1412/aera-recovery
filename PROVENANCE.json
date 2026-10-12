@@ -13,6 +13,18 @@
   "history_blob_audit_count": 68,
   "device_files": [
     {
+      "path": ".gitattributes",
+      "sha256": "7a4b5d19311308722e25a56f6cdd7d573956967a48816775ee6d49a1a8132609"
+    },
+    {
+      "path": ".github/workflows/build.yml",
+      "sha256": "68414899b6ca93215a58ea77966b1ab4c18176f697d4548836de31e40a6bafd7"
+    },
+    {
+      "path": ".gitignore",
+      "sha256": "cf99ba67fa5d86223791d1e4b9e3b1e6e90fbc5241ba3e1b14e234a16baf5dd2"
+    },
+    {
       "path": "Android.bp",
       "sha256": "67659d653130e6742e5396cbd651491701e574fdb2e14893bf3a419a7f925624"
     },
@@ -22,19 +34,35 @@
     },
     {
       "path": "AndroidBoard.mk",
-      "sha256": "cd23cf596a4dcda6cf3c51159ed0545db6772dbaa76e0e87a3b924c06311f993"
+      "sha256": "6d1011fe2a53748847a2a8fc45f09f01e12a266de5b406ad1a6fe3807db8c99b"
     },
     {
       "path": "AndroidProducts.mk",
-      "sha256": "528a8b1aa68ea67e9ac960a8bd6eb6fa68efd43559ba698d60608f20c68460d5"
+      "sha256": "42a2200be8e52f5db290aa1ffa22d2b18804aadb5c60d8aa5a8f7c338f7771b8"
     },
     {
       "path": "BoardConfig.mk",
-      "sha256": "7c7466e57716bc07a897d0cf0c7fe726e7f94acb57dcfd79c582a81d507ffd68"
+      "sha256": "d6fbcc4bc827ba3ee3a01dc126d637473501937ffdad57c4df0819dd24ce61a2"
+    },
+    {
+      "path": "LICENSE",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    {
+      "path": "NOTICE",
+      "sha256": "9ad8e4b282f409ba41a89ef856d76b4ba17ff2d6b63335e4749870dd878622f0"
+    },
+    {
+      "path": "README.md",
+      "sha256": "bee788c8fcc86f790fa339d894145cd24c75a8b93d0648fc007a7228da0dbbe7"
+    },
+    {
+      "path": "aera_astonc.mk",
+      "sha256": "3deea1a95ad11aed595ac22b43ba51effd2584ce702023890590319256cd4ba2"
     },
     {
       "path": "config/README.md",
-      "sha256": "e877156bd85ac14bf392ab02cf8f803a43e2dca29a7394d56237038cda3a05f8"
+      "sha256": "20bf2acb917d6f679fa3ea54d1de995ef277bd2994f405038485ffa8529ec0c4"
     },
     {
       "path": "config/crypto-device-permissions.json",
@@ -78,43 +106,39 @@
     },
     {
       "path": "config/recovery-ui-inputs.json",
-      "sha256": "614887c6a9d49b3f43ed6b9c29ca4890861d800355bcde96817c38a101c29d91"
+      "sha256": "7cc2c4ec6b09bbe57f36846a6dfecb784ccd94ee7668979f16e18025941b6ba5"
     },
     {
       "path": "device.mk",
-      "sha256": "2f80ebb5c9129825a283898e1cb893aee774c45439c80d06da5fc7b6c880d68f"
+      "sha256": "819a649fe1754eb482bada68a3e47217ed96a757268fa761476716e84ea0c738"
     },
     {
-      "path": "recovery/root/etc",
-      "symlink": "/system/etc"
+      "path": "docs/修复报告.md",
+      "sha256": "2d6ec6fe5190eccd0d58c3b05d25336b2ecfb27b2b071954076e5054208a7555"
     },
     {
       "path": "recovery/root/init.recovery.qcom.rc",
       "sha256": "fa4253e8dea762bac0168f07b769963bffc3fea2e7da1d6d458cb7204f244201"
     },
     {
-      "path": "recovery/root/init.recovery.wifi.rc",
-      "sha256": "1540260ebb85784a528bab341512bf849d2512b2ee4e30a43eec5828f1e08b63"
-    },
-    {
       "path": "recovery/root/init.recovery.usb.rc",
       "sha256": "bf83625da020ae6541ce5577e422ed5ebdcb203f51259f8fc414ccc2674faaa0"
     },
     {
-      "path": "recovery/root/lib/firmware",
-      "symlink": "/vendor/firmware_mnt/image"
+      "path": "recovery/root/init.recovery.wifi.rc",
+      "sha256": "1540260ebb85784a528bab341512bf849d2512b2ee4e30a43eec5828f1e08b63"
     },
     {
       "path": "recovery/root/linkerconfig/ld.config.txt",
       "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     },
     {
-      "path": "recovery/root/sbin/linker64",
-      "symlink": "/system/bin/linker64"
-    },
-    {
       "path": "recovery/root/system/bin/astonc-cpu-sensor",
       "sha256": "3f1aa4f31450a299a8e08e30f289ff5d41f1d02f9c39fe3741e576dfad9ddd56"
+    },
+    {
+      "path": "recovery/root/system/bin/beforemodules.sh",
+      "sha256": "d392af5f81484838c390f9cd78095522c6700cd5c83d511b7f624e061f35b3ec"
     },
     {
       "path": "recovery/root/system/etc/.gitkeep",
@@ -122,7 +146,7 @@
     },
     {
       "path": "recovery/root/system/etc/init/astonc.gatekeeper.rc",
-      "sha256": "28ee0653110cc960aaec0b08907e2e23979d1ca50d32845c071b08cc15274162"
+      "sha256": "13dfb4fbed15695040e10675c2becb9c29d7570e2ad13d09bdf403995a736c88"
     },
     {
       "path": "recovery/root/system/etc/init/astonc.lpdumpd.rc",
@@ -135,6 +159,10 @@
     {
       "path": "recovery/root/system/etc/ld.config.txt",
       "sha256": "b64cd524de88d22fd0416b12343483e4e8f2fe6ce8edd53a09bde66c171da174"
+    },
+    {
+      "path": "recovery/root/system/etc/recovery-ui2.enabled",
+      "sha256": "a17bf2cfd7b99bce9e41f8ff24c1ede0e3d22fadfa09371e7ff4d080e6ac86c1"
     },
     {
       "path": "recovery/root/system/etc/recovery.fstab",
@@ -189,8 +217,48 @@
       "sha256": "6f136d2093d0b27c84b0533a7cbbf7565f40866d3dfa1ff5abfa822c6ef56ffa"
     },
     {
+      "path": "scripts/check-build-refs.py",
+      "sha256": "54bd21b3864f074e6084df53e547ab4b86d593fb835481e09937983ff30a6dea"
+    },
+    {
+      "path": "scripts/check-provenance.py",
+      "sha256": "2ee830ed493cd93435e80a21a8f1b3eb83631fedb45aa218e99acc670448317f"
+    },
+    {
+      "path": "scripts/fix-recovery-vintf.py",
+      "sha256": "38508b3f51f0096bfb6e09cf46fe1759c95a7cd85c2abd7f21c1dcf0174628a9"
+    },
+    {
+      "path": "scripts/integration-test.py",
+      "sha256": "6c68d06e5b3c3fefcf8d2bba3b8b91889e1e31921bd93627719944e3de054b73"
+    },
+    {
+      "path": "scripts/live-patch.sh",
+      "sha256": "60ff905060026cc6a7871b7d16a8d74d7f4efb10cc5dbee07e67fd9893c40af6"
+    },
+    {
       "path": "scripts/prepare-crypto-properties.py",
       "sha256": "aa257e6342291c948dfa0e1edc6e58b77f71f37018e45d672d1446550d9ae25e"
+    },
+    {
+      "path": "scripts/regen-provenance.py",
+      "sha256": "eb74afdae9f74fd1a52ff112609d2d16cc660d754263b9a3f7a67dd313b4b119"
+    },
+    {
+      "path": "scripts/test-live-patch-sed.sh",
+      "sha256": "12977df2a788295ae727fd1b23488071ac0c99b9e211c725337987ec680ce993"
+    },
+    {
+      "path": "scripts/test-service-check-parse.sh",
+      "sha256": "98df1fb7857c7d2e893679993ed554b3bea0fc8ee7965ceeb404aaeeb2c8ab69"
+    },
+    {
+      "path": "scripts/verify-decrypt-fix.sh",
+      "sha256": "5fedc9f523a7774ce3e66393826f2fe0fb5cd524e547f96deb21712a4bdc3929"
+    },
+    {
+      "path": "scripts/verify-vintf-fix.py",
+      "sha256": "036ba9f36967cc49d8fe6e03b6dffcb007fdaeaef103cdbc90696d9ce2b34697"
     },
     {
       "path": "sepolicy/file_contexts",
@@ -210,7 +278,7 @@
     },
     {
       "path": "vendorsetup.sh",
-      "sha256": "cd3243c1827db9d04f7ab26b123609c2910df87f9b4cf0c303f9e710cbd65957"
+      "sha256": "7a6c369a22abc281ee52dd2fc022cadfe070131b85a40e714f5f257c58fe1f8f"
     }
   ],
   "limits": "Proprietary dependencies are omitted and pinned in config manifests. Source patches and build/test tooling are maintained in the source repository. Clean build-15 has no separate device acceptance."

@@ -1,0 +1,37 @@
+# Normalise line endings on commit.
+#
+# Why this file exists: the tree was materialised on a Windows volume without
+# any line-ending rule, so every text file was checked out with CRLF while the
+# git index holds LF. The result was that `git status` reported all ~64 tracked
+# files as modified in a clean checkout, which hides real edits, makes any
+# content hash depend on the platform, and would have pushed a full-tree CRLF
+# commit the first time someone staged changes from Windows.
+#
+# `text=auto` lets git detect text files and store LF in the repository
+# regardless of how they were checked out; `eol=lf` keeps LF on checkout too, so
+# a checkout is byte-identical everywhere. Binary assets are left untouched by
+# automatic detection; the explicit patterns below cover the types git would
+# otherwise be tempted to normalise inside a recovery tree.
+
+* text=auto eol=lf
+
+# Binary assets: never convert these.
+*.png  binary
+*.jpg  binary
+*.webp binary
+*.gif  binary
+*.ttf  binary
+*.otf  binary
+*.z    binary
+*.gz   binary
+*.lz4  binary
+*.img  binary
+*.so   binary
+*.ko   binary
+*.apk  binary
+*.jar  binary
+*.zip  binary
+
+# Patches and hex dumps must keep their exact bytes.
+*.patch text eol=lf
+*.diff  text eol=lf
