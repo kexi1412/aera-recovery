@@ -18,7 +18,7 @@
     },
     {
       "path": ".github/workflows/build.yml",
-      "sha256": "18c10064ed2be577e977fed6d6cb0f8f7db1bb20f3f1908a24916c6957123ef9"
+      "sha256": "9e7c222dfaaeb225eb46d413cc22f6023ec47b091e46790943c6860fade21033"
     },
     {
       "path": ".gitignore",
@@ -58,7 +58,7 @@
     },
     {
       "path": "aera_astonc.mk",
-      "sha256": "1295f0ee9f4073af98cb40b569fffadf432b7c8ebe2833c0bd5bc4cba59a750e"
+      "sha256": "c3f51ec170fabe69322b5901a7cc6d9ec38dbd6a63be4243f075bdbe2f657b60"
     },
     {
       "path": "config/README.md",

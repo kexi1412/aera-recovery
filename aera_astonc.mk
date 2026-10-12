@@ -60,10 +60,23 @@ AERA_LOAD_VENDOR_MODULES_EXCLUDE_GKI := true
 # Wi-Fi: QCA6490 attached over PCIe, driven by the kiwi_v2 host driver.
 #
 # The module loader is MANDATORY for Wi-Fi. AERA_ENABLE_WLAN alone only compiles
-# wlan.cpp in; the driver stack still has to reach the kernel, and recovery init
-# loads nothing but cfg80211/mac80211 from the vendor_boot ramdisk. With the stack
-# absent, wlan0 never appears and Wlan::StartInitSupplicantService() times out on
-# init.svc.wpa_supplicant.
+# wlan.cpp in; the driver stack still has to reach the kernel.
+#
+# Note the two ramdisks are different, which is easy to conflate (see the
+# EXCLUDE_GKI comment above, where the recovery ramdisk is the one with no
+# /lib/modules):
+#
+#   recovery.img ramdisk      no /lib/modules at all.
+#   vendor_boot ramdisk       mounted at /lib/modules and DOES carry a module
+#                             tree (config/kernel-modules.json lists 450 files),
+#                             but the only Wi-Fi entries in it are cfg80211.ko
+#                             and mac80211.ko (modules.load.recovery:405-406).
+#
+# So cfg80211/mac80211 may already be present, while the CNSS service layer, the
+# PCIe host driver and kiwi_v2 are NOT in that tree at all - they exist only in
+# /vendor_dlkm/lib/modules, which nothing mounts or loads unless the recovery
+# module loader does it. With the stack absent, wlan0 never appears and
+# Wlan::StartInitSupplicantService() times out on init.svc.wpa_supplicant.
 #
 # KernelModuleLoader::Load_Vendor_Modules() matches this list by EXACT filename
 # including the .ko suffix against the entries present in its module directories,
