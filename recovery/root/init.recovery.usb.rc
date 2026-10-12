@@ -111,6 +111,64 @@ on property:sys.usb.ffs.mtp.ready=1 && property:sys.usb.config=mtp && property:s
 # the link to plain "adb", so the next Enable_MTP() observes a clean 0 -> 1
 # transition and re-fires the bind above. The rm keeps a stale f2 from surviving
 # a transition that never reached the two-interface handler.
+#
+# f1 is removed here as well. Upstream's own "=none" handler unlinks only f1,
+# and this block runs first (this file is imported at init.rc line 4), so
+# clearing both links here makes the teardown independent of the upstream
+# handler still existing. Without it a stale f1 survives into fastbootd and the
+# next bind dies with "symlink() failed: File exists".
 on property:sys.usb.config=none && property:sys.usb.configfs=1
     setprop sys.usb.ffs.mtp.ready 0
+    rm /config/usb_gadget/g1/configs/b.1/f1
     rm /config/usb_gadget/g1/configs/b.1/f2
+
+# ---------------------------------------------------------------------------
+# Fastbootd binding
+# ---------------------------------------------------------------------------
+# astonc: Menu -> Reboot -> Bootloader and live fastbootd were dead. The reason
+# is visible on the device and was captured in the 9008 kmsg dump of a normal
+# adb boot, where the vendor USB init wins the gadget and the shared handler
+# then fails twice over:
+#
+#   18.709 init: processing action (... sys.usb.ffs.ready=1) from (/dev/user_init.rc
+#   18.739 init: Command 'symlink .../ffs.adb .../f1' ... (/init.recovery.usb.rc:100)
+#             took 0ms and failed: symlink() failed: File exists
+#   18.739 init: Command 'write .../g1/UDC ${sys.usb.controller}'
+#             ... (/init.recovery.usb.rc:101) took 0ms and failed:
+#             Unable to write to file '.../UDC': Device or resource busy
+#
+# Plus, at 17.18, "init.qcom.usb.rc set idProduct to 0x4ee7 / 0x2769" -- the
+# vendor init re-writes the gadget identity underneath us.
+#
+# The shared upstream fastboot action (etc/init.rc:254) never unbinds. It
+# writes idProduct, writes the configuration string, symlinks f1 and then writes
+# the UDC. If anything already owns the gadget, both the symlink and the UDC
+# write fail exactly as above, and the host never sees a fastboot interface.
+#
+# RecoveryEnterFastbootd() (aera_backend.cpp:556) publishes
+# sys.usb.config=fastboot, and fastbootd itself writes its descriptors to
+# /dev/usb-ffs/fastboot/ep0 and raises sys.usb.ffs.ready -- verified in the
+# shipped fastbootd binary, where the ADRP+ADD at 0xda414/0xda418 resolve to
+# the literal "sys.usb.ffs.ready" and the following BL lands on
+# android::base::SetProperty (PLT entry 25). So gating on sys.usb.ffs.ready=1
+# fires only once fastbootd's endpoints are real, and this block then owns the
+# whole bind.
+#
+# The teardown comes first: drop the UDC, unlink both configs, then publish the
+# fastboot identity (4EE0 from ro.recovery.usb.fastboot.pid) and re-bind. That
+# order is what makes the MTP path above work on this device, so fastboot uses
+# the same shape.
+#
+# Upstream's fastboot action still runs afterwards. With the UDC already bound
+# to the correct configuration its writes are redundant rather than fatal, and
+# the host enumerates the fastboot interface either way.
+on property:sys.usb.config=fastboot && property:sys.usb.ffs.ready=1 && property:sys.usb.configfs=1
+    write /config/usb_gadget/g1/UDC none
+    rm /config/usb_gadget/g1/configs/b.1/f1
+    rm /config/usb_gadget/g1/configs/b.1/f2
+    write /config/usb_gadget/g1/idVendor 0x18D1
+    write /config/usb_gadget/g1/idProduct 0x${ro.recovery.usb.fastboot.pid}
+    write /config/usb_gadget/g1/configs/b.1/strings/0x409/configuration "fastboot"
+    symlink /config/usb_gadget/g1/functions/ffs.fastboot /config/usb_gadget/g1/configs/b.1/f1
+    write /config/usb_gadget/g1/UDC ${sys.usb.controller}
+    setprop sys.usb.state ${sys.usb.config}

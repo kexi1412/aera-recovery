@@ -53,3 +53,21 @@ AERA_USE_LZ4_COMPRESSION := 1
 # set. They cannot be enabled independently of the recovery module loader, and
 # that loader is deliberately off in BoardConfig.mk - see the note there.
 AERA_LOAD_VENDOR_MODULES_EXCLUDE_GKI := 1
+
+# Root Manager, the offline KernelSU / KernelSU-Next / SukiSU-Ultra providers.
+#
+# Upstream commit 2782981 ("root: add a unified Root Manager flag for device
+# and PC tools") merged the three per-provider switches into this single knob
+# and defaulted it to 0 in aera_config.mk:7. The three switches this file used
+# to export through vendorsetup.sh are no longer read anywhere, so without
+# this line the Menu row is skipped at runtime, the providers are not staged
+# into system/etc/aera/root-providers and the PC Root tools are hidden.
+#
+# 1 is the only value that enables anything: the flag reaches the UI as
+# -DAERA_ENABLE_ROOT_MANAGER (aera_build.mk:823 and aeraui_defaults.go:35, the
+# latter reading it back through the twrpVarsPlugin vendor config) and gates
+# the packaging copy at aera_build.mk:913. All three providers travel together
+# in prebuilt/aera/root, so this is a single on/off decision, not a per-provider
+# one.
+AERA_ENABLE_ROOT_MANAGER := 1
+

@@ -105,7 +105,11 @@ AB_OTA_PARTITIONS := boot init_boot vendor_boot recovery dtbo vbmeta vbmeta_syst
 BOARD_SUPER_PARTITION_SIZE := 16642998272
 BOARD_SUPER_PARTITION_GROUPS := qti_dynamic_partitions
 BOARD_QTI_DYNAMIC_PARTITIONS_SIZE := 16638803968
-BOARD_QTI_DYNAMIC_PARTITIONS_PARTITION_LIST := system system_ext vendor product my_product odm my_engineering vendor_dlkm system_dlkm my_stock my_heytap my_carrier my_region my_bigball my_manifest
+# Full OnePlus PLK110 super group, verified against the device's own vendor fstab
+# and a live `dmsetup list`: 18 logical partitions. Dropping any of them hides that
+# target from the flash-image list, because that list is derived from the recovery
+# fstab's `logical` entries (TWFLAG_LOGICAL -> Is_Super -> aera_flashimg).
+BOARD_QTI_DYNAMIC_PARTITIONS_PARTITION_LIST := system system_ext product vendor odm system_dlkm vendor_dlkm odm_dlkm my_bigball my_carrier my_company my_engineering my_heytap my_manifest my_preload my_product my_region my_stock
 BOARD_VENDORIMAGE_FILE_SYSTEM_TYPE := erofs
 BOARD_ODMIMAGE_FILE_SYSTEM_TYPE := erofs
 BOARD_PRODUCTIMAGE_FILE_SYSTEM_TYPE := erofs

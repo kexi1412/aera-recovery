@@ -8,6 +8,17 @@ vendor /vendor erofs ro wait,slotselect,logical,backup=1,wipeingui=0,canbewiped=
 odm /odm erofs ro wait,slotselect,logical,backup=1,wipeingui=0,canbewiped=0
 vendor_dlkm /vendor_dlkm ext4 ro wait,slotselect,logical,backup=1,wipeingui=0,canbewiped=0
 system_dlkm /system_dlkm ext4 ro wait,slotselect,logical,backup=1,wipeingui=0,canbewiped=0
+odm_dlkm /odm_dlkm ext4 ro wait,slotselect,logical,backup=1,wipeingui=0,canbewiped=0
+my_product /my_product erofs ro wait,slotselect,logical,backup=1,wipeingui=0,canbewiped=0
+my_company /my_company erofs ro wait,slotselect,logical,backup=1,wipeingui=0,canbewiped=0
+my_carrier /my_carrier erofs ro wait,slotselect,logical,backup=1,wipeingui=0,canbewiped=0
+my_region /my_region erofs ro wait,slotselect,logical,backup=1,wipeingui=0,canbewiped=0
+my_bigball /my_bigball erofs ro wait,slotselect,logical,backup=1,wipeingui=0,canbewiped=0
+my_heytap /my_heytap erofs ro wait,slotselect,logical,backup=1,wipeingui=0,canbewiped=0
+my_stock /my_stock erofs ro wait,slotselect,logical,backup=1,wipeingui=0,canbewiped=0
+my_preload /my_preload erofs ro wait,slotselect,logical,backup=1,wipeingui=0,canbewiped=0
+my_manifest /my_manifest erofs ro wait,slotselect,logical,backup=1,wipeingui=0,canbewiped=0
+my_engineering /my_engineering erofs ro wait,slotselect,logical,backup=1,wipeingui=0,canbewiped=0
 /dev/block/by-name/boot /boot emmc defaults slotselect,backup=1,flashimg=1
 /dev/block/by-name/init_boot /init_boot emmc defaults slotselect,backup=1,flashimg=1
 /dev/block/by-name/vendor_boot /vendor_boot emmc defaults slotselect,backup=1,flashimg=1

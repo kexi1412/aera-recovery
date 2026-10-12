@@ -57,10 +57,18 @@ if [ "$1" = "$FDEVICE" -o "$AERA_BUILD_DEVICE" = "$FDEVICE" ]; then
     export AERA_ALLOW_EARLY_SETTINGS_LOAD=1
 
     # Root add-ons verified on this device.
+    #
+    # AERA_ENABLE_KERNELSU_SUPPORT / _NEXT_SUPPORT / _SUKISU_SUPPORT stopped
+    # being read by upstream 2782981 ("root: add a unified Root Manager flag
+    # for device and PC tools"), which replaced all three with the single
+    # AERA_ENABLE_ROOT_MANAGER. Exporting the old names is now a silent no-op,
+    # so doing only that is exactly how Root Manager went missing from the
+    # Menu. aera_astonc.mk carries the authoritative value; this export keeps
+    # the environment consistent for the host wrapper and any cached lunch
+    # state, which aera_build.mk:825-831 deliberately re-resolves anyway.
     export AERA_USE_DMSETUP=1
-    export AERA_ENABLE_KERNELSU_SUPPORT=1
-    export AERA_ENABLE_KERNELSU_NEXT_SUPPORT=1
-    export AERA_ENABLE_SUKISU_SUPPORT=1
+    export AERA_ENABLE_ROOT_MANAGER=1
+
 
     # Advanced security is intentionally NOT enabled.
     #

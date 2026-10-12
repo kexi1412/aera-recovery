@@ -18,7 +18,7 @@
     },
     {
       "path": ".github/workflows/build.yml",
-      "sha256": "84f041f406b81e2331511edd7cf152d6fd0d8924daf571d9dafe2221df4703e9"
+      "sha256": "bf585001ae2e3abf731d1a3fab905106298d0f9ed5cf66ae41ac6139eeeecae9"
     },
     {
       "path": ".gitignore",
@@ -42,7 +42,7 @@
     },
     {
       "path": "BoardConfig.mk",
-      "sha256": "2fabe5e0a25d6560724a5c9b749287855748f896824208d47e112237fde382df"
+      "sha256": "5377e12c978eac2db2d6f62b280a620e54a7dda66c0b6cdf70262b153cf25667"
     },
     {
       "path": "LICENSE",
@@ -58,7 +58,7 @@
     },
     {
       "path": "aera_astonc.mk",
-      "sha256": "080adcc09b6f5627cbc43a0b9ec0a61fd1a85b84a6f47c5d1d71f33dacf5672f"
+      "sha256": "a157fe1e3bf91d32021770260779a99964fbb1b768c86fc6f135e79b0746408d"
     },
     {
       "path": "config/README.md",
@@ -122,7 +122,7 @@
     },
     {
       "path": "recovery/root/init.recovery.usb.rc",
-      "sha256": "bf83625da020ae6541ce5577e422ed5ebdcb203f51259f8fc414ccc2674faaa0"
+      "sha256": "9aab170efe7f49be9b3c5e9a275f2b2429604415c43d2cdd5605df0429910fd1"
     },
     {
       "path": "recovery/root/linkerconfig/ld.config.txt",
@@ -158,7 +158,7 @@
     },
     {
       "path": "recovery/root/system/etc/recovery.fstab",
-      "sha256": "4e7c52a2e0e45e0973516dcc1fe9f1d9da2dd0d02c0f14c1ed29906896a73e0d"
+      "sha256": "502af7e55ee68f431081f3d7fc91b6f46f0b0eda3f17635f2915bd816ffff5f9"
     },
     {
       "path": "recovery/root/system/etc/twrp.flags",
@@ -217,6 +217,14 @@
       "sha256": "2ee830ed493cd93435e80a21a8f1b3eb83631fedb45aa218e99acc670448317f"
     },
     {
+      "path": "scripts/fix-battery-read.py",
+      "sha256": "afbdb9ff8ff8027455bd65c720b394494022cc9b328086eabda4d533232ea6c7"
+    },
+    {
+      "path": "scripts/fix-reboot-fastboot.py",
+      "sha256": "151fce49f27bd3105d3d54ef0435b65849433bc0f2247ca0a31f272f5bb20b5c"
+    },
+    {
       "path": "scripts/fix-recovery-vintf.py",
       "sha256": "38508b3f51f0096bfb6e09cf46fe1759c95a7cd85c2abd7f21c1dcf0174628a9"
     },
@@ -235,6 +243,10 @@
     {
       "path": "scripts/regen-provenance.py",
       "sha256": "eb74afdae9f74fd1a52ff112609d2d16cc660d754263b9a3f7a67dd313b4b119"
+    },
+    {
+      "path": "scripts/restore-menu-language.py",
+      "sha256": "8fdc8d08f51ff693bee0b1b3702f4586c8e2b7ff31692ebd013a4497fa15aa27"
     },
     {
       "path": "scripts/test-live-patch-sed.sh",
@@ -270,7 +282,7 @@
     },
     {
       "path": "vendorsetup.sh",
-      "sha256": "7a6c369a22abc281ee52dd2fc022cadfe070131b85a40e714f5f257c58fe1f8f"
+      "sha256": "79c48cca93141c11ada860f50ce49cffbd87e61813ba58696a1062fb2070c494"
     }
   ],
   "limits": "Proprietary dependencies are omitted and pinned in config manifests. Source patches and build/test tooling are maintained in the source repository. Clean build-15 has no separate device acceptance."

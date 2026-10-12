@@ -503,7 +503,44 @@ jobs:
             fail=1
           fi
 
-          # 5. Report what is left, so the values are in the log even on success.
+          # 5. Root Manager is opt-in upstream and this device has to opt in.
+          #
+          #    Upstream 2782981 replaced AERA_ENABLE_KERNELSU_SUPPORT,
+          #    AERA_ENABLE_KERNELSU_NEXT_SUPPORT and AERA_ENABLE_SUKISU_SUPPORT
+          #    with the single AERA_ENABLE_ROOT_MANAGER and defaulted it to 0 in
+          #    aera_config.mk:7. The three old names are read nowhere now, so a
+          #    device tree that still exports only those builds a recovery whose
+          #    Menu silently omits the Root Manager row
+          #    (tool_scene.cpp: `if (item.action == Action::kRootManager &&
+          #    !root::Enabled()) continue;`) and whose ramdisk omits
+          #    system/etc/aera/root-providers entirely.
+          #
+          #    That failure is invisible in every other check: the image builds,
+          #    flashes and boots, and the only symptom is a missing row.
+          if ! grep -qE '^[[:space:]]*AERA_ENABLE_ROOT_MANAGER[[:space:]]*:?=[[:space:]]*1[[:space:]]*$' "$am"; then
+            echo "::error::aera_astonc.mk does not set AERA_ENABLE_ROOT_MANAGER := 1; the Menu will omit Root Manager"
+            grep -nE '^[[:space:]]*AERA_ENABLE_ROOT_MANAGER' "$am" || echo "  (no assignment at all)"
+            fail=1
+          fi
+          # The superseded names must be gone, not merely accompanied: leaving
+          # them implies they still do something.
+          for stale in AERA_ENABLE_KERNELSU_SUPPORT \
+                       AERA_ENABLE_KERNELSU_NEXT_SUPPORT \
+                       AERA_ENABLE_SUKISU_SUPPORT; do
+            if grep -rqE "^[[:space:]]*(export[[:space:]]+)?${stale}[[:space:]]*:?=" "$dt"; then
+              echo "::error::$stale is read by nothing upstream (2782981); AERA_ENABLE_ROOT_MANAGER replaced it"
+              grep -rnE "^[[:space:]]*(export[[:space:]]+)?${stale}[[:space:]]*:?=" "$dt" || true
+              fail=1
+            fi
+          done
+          # And the build-time Menu revert has to be wired, or the row comes
+          # back as PC connection even though Root Manager returned.
+          if [ ! -f "$dt/scripts/restore-menu-language.py" ]; then
+            echo "::error::scripts/restore-menu-language.py is missing; Menu slot 9 will stay PC connection"
+            fail=1
+          fi
+
+          # 6. Report what is left, so the values are in the log even on success.
           #    The pattern is anchored on the assignment so the two EXCLUDE_GKI
           #    switches are listed separately and not as if they were Wi-Fi.
           echo "--- Wi-Fi switches (want none) ---"
@@ -516,12 +553,20 @@ jobs:
             || echo "  (none)"
           echo "--- vintf preparation hook ---"
           grep -n 'fix-recovery-vintf\.py' "$bc" || true
+          echo "--- root manager switch (want AERA_ENABLE_ROOT_MANAGER := 1) ---"
+          grep -nE '^[[:space:]]*AERA_ENABLE_ROOT_MANAGER[[:space:]]*:?=' "$am" "$dt/vendorsetup.sh" \
+            || echo "  (none)"
+          echo "--- superseded root switches (want none) ---"
+          grep -rnE '^[[:space:]]*(export[[:space:]]+)?AERA_ENABLE_(KERNELSU|KERNELSU_NEXT|SUKISU)_SUPPORT[[:space:]]*:?=' "$dt" \
+            || echo "  (none)"
+          echo "--- menu revert helper (want present) ---"
+          ls -l "$dt/scripts/restore-menu-language.py" || true
 
           if [ "$fail" -ne 0 ]; then
-            echo "::error::Wi-Fi removal is incomplete or the VINTF fix is unwired; refusing to start a multi-hour build"
+            echo "::error::the build configuration is wrong (Wi-Fi removal, VINTF fix or Root Manager); refusing to start a multi-hour build"
             exit 1
           fi
-          echo "Wi-Fi removal OK; VINTF fix wired"
+          echo "Wi-Fi removal OK; VINTF fix wired; Root Manager enabled"
 
       - name: Apply upstream source fixes
         run: |
@@ -587,6 +632,138 @@ jobs:
           else
             echo "$mk does not carry rclone_prebuilt (upstream may have moved it)"
           fi
+
+          # Restore the Menu arrangement this device was verified against.
+          #
+          # Upstream b9eddda ("ui2: move PC Connection to Menu and Language to
+          # Preferences") rewrote slot 9 of the hard-coded Menu array in
+          # aeraui/scenes/tool_scene.cpp, replacing the Language row with a PC
+          # connection row. Language survived, but only as a row inside
+          # Preferences -- a different destination, and one this device's flow
+          # does not use. The recovery repository is not one this project can
+          # push to, so the revert happens here against the freshly synced tree.
+          #
+          # The helper asserts every assumption (single 12-row array, exactly
+          # one PC row inside it, the Preferences Language row still present) and
+          # refuses to guess if upstream reshapes the file. It is idempotent, so
+          # a re-run after a partial failure is safe.
+          python3 device/oneplus/astonc/scripts/restore-menu-language.py bootable/recovery
+
+          # Re-check the result at the source level, which is the only place the
+          # negative direction is observable: the PC row must be gone from the
+          # Menu array while BuildPcConnection() and the PC pairing panel keep
+          # their own copies of that description string.
+          ts=bootable/recovery/aeraui/scenes/tool_scene.cpp
+          if grep -qF 'Action::kPcConnection},' "$ts"; then
+            echo "::error::tool_scene.cpp still has a kPcConnection Menu row after the revert"
+            grep -nF 'Action::kPcConnection}' "$ts" || true
+            exit 1
+          fi
+          if ! grep -qF '{"A", "Language", "Choose the recovery interface language", Action::kLanguage},' "$ts"; then
+            echo "::error::the Menu Language row is not in tool_scene.cpp after the revert"
+            exit 1
+          fi
+          if ! grep -qF 'PreferenceEntry(state, LV_SYMBOL_KEYBOARD, "Language"' "$ts"; then
+            echo "::error::the Preferences Language entry is gone; upstream changed the language entry points again"
+            exit 1
+          fi
+          echo "Menu slot 9 is the Language row; the Preferences Language entry is intact"
+
+          # astonc: the status-bar battery read and the "restart in hardware
+          # fastboot" path were both broken. Both are defects in the shared AERA
+          # tree, not in this device's configuration, and neither can be fixed
+          # from a BoardConfig variable, so both are patched here against the
+          # freshly synced tree.
+          #
+          # Battery: aeraui/core/status_bar.cpp:515 reads
+          # /sys/class/power_supply/battery/capacity with a single fopen/fscanf
+          # and clamps the result into 0..100. On this device the gauge node
+          # answers before the fuel gauge is initialised, and the 9008 kmsg dump
+          # shows the health HAL needing 19 retries ("opened battery/capacity
+          # after 19 retries") and healthd logging "battery none" eleven times.
+          # Clamping that "not ready" answer turned it into a confident 0%, and
+          # the status bar only re-read every ten ticks, so the bar sat at --%
+          # for the whole window. The patch rejects out-of-range readings and
+          # re-reads every tick until a plausible one arrives.
+          python3 device/oneplus/astonc/scripts/fix-battery-read.py bootable/recovery
+
+          sb=bootable/recovery/aeraui/core/status_bar.cpp
+          if ! grep -qF 'capacity >= 0 && capacity <= 100' "$sb"; then
+            echo "::error::status_bar.cpp does not range-check the battery reading"
+            exit 1
+          fi
+          if grep -qF 'std::clamp(capacity, 0, 100)' "$sb"; then
+            echo "::error::status_bar.cpp still clamps an unread battery into 0%"
+            exit 1
+          fi
+          if ! grep -qF 'state->battery < 0 || state->ticks % 10 == 0' "$sb"; then
+            echo "::error::the status bar does not poll every tick while the battery is unread"
+            exit 1
+          fi
+          echo "Battery read range-checked and polled while unread"
+
+          # Reboot: tw_reboot()'s rb_bootloader and rb_fastboot cases requested
+          # the reboot without clearing the BCB first. init queues that request
+          # through write_reboot_bootloader(), which refuses to touch misc while
+          # a command is still pending ("Bootloader command pending.") and then
+          # drops the request, so the device flashed the transition screen and
+          # stayed in recovery. rb_system already cleared it; these two did not.
+          python3 device/oneplus/astonc/scripts/fix-reboot-fastboot.py bootable/recovery
+
+          tr=bootable/recovery/twrp-functions.cpp
+          if ! grep -qF 'case rb_bootloader:' "$tr"; then
+            echo "::error::the rb_bootloader case is gone from twrp-functions.cpp"
+            exit 1
+          fi
+          # The clear must sit inside both fastboot-related cases, so assert it
+          # appears exactly three times: rb_system (upstream) plus the two added
+          # here. A count catches a silent reordering as well as a missing call.
+          n=$(grep -cF 'Clear_Bootloader_Message();' "$tr")
+          if [ "$n" -ne 3 ]; then
+            echo "::error::expected 3 Clear_Bootloader_Message() calls in twrp-functions.cpp, found $n"
+            exit 1
+          fi
+          if ! grep -qF 'return request_power_control("reboot,bootloader");' "$tr" ||
+             ! grep -qF 'return request_power_control("reboot,fastboot");' "$tr"; then
+            echo "::error::the reboot requests themselves were lost while clearing the BCB"
+            exit 1
+          fi
+          echo "rb_bootloader and rb_fastboot clear the BCB before requesting the reboot"
+
+          # fastbootd: the device tree has to own the fastboot gadget bind,
+          # because the shared upstream action never unbinds the UDC first and
+          # dies on this device with "symlink() failed: File exists" and
+          # "Device or resource busy" (9008 kmsg, /init.recovery.usb.rc:100-101).
+          usbrc=recovery/root/init.recovery.usb.rc
+          if ! grep -qF 'on property:sys.usb.config=fastboot && property:sys.usb.ffs.ready=1 && property:sys.usb.configfs=1' "$usbrc"; then
+            echo "::error::$usbrc has no fastbootd bind handler"
+            exit 1
+          fi
+          if ! grep -qF 'symlink /config/usb_gadget/g1/functions/ffs.fastboot /config/usb_gadget/g1/configs/b.1/f1' "$usbrc"; then
+            echo "::error::$usbrc does not link ffs.fastboot into the gadget"
+            exit 1
+          fi
+          if ! grep -qF 'idProduct 0x${ro.recovery.usb.fastboot.pid}' "$usbrc"; then
+            echo "::error::$usbrc does not publish the fastboot idProduct"
+            exit 1
+          fi
+          # The teardown must come before the bind, which is the whole point.
+          first=$(grep -nF 'on property:sys.usb.config=fastboot' "$usbrc" | head -1 | cut -d: -f1)
+          unbind=$(awk -v s="$first" 'NR>=s && /write \/config\/usb_gadget\/g1\/UDC none/ {print NR; exit}' "$usbrc")
+          link=$(awk -v s="$first" 'NR>=s && /functions\/ffs\.fastboot .*\/f1$/ {print NR; exit}' "$usbrc")
+          if [ -z "$unbind" ] || [ -z "$link" ] || [ "$unbind" -ge "$link" ]; then
+            echo "::error::$usbrc must unbind the UDC before it symlinks ffs.fastboot (unbind=$unbind link=$link)"
+            exit 1
+          fi
+          # MTP must survive: it is the only working file transfer on this build.
+          for h in 'config=mtp,adb' 'config=mtp &&'; do
+            if ! grep -qF "on property:sys.usb.ffs.mtp.ready=1 && property:sys.usb.$h" "$usbrc" &&
+               ! grep -qF "on property:sys.usb.$h" "$usbrc"; then
+              echo "::error::$usbrc lost the MTP handler for $h"
+              exit 1
+            fi
+          done
+          echo "fastbootd bind owns the gadget teardown; the MTP handlers are intact"
 
       - name: Build recovery
         env:
@@ -949,6 +1126,176 @@ jobs:
             exit 1
           fi
           echo "no Wi-Fi artifacts in the recovery ramdisk"
+
+      - name: Verify the Menu revert, the Root Manager payload and the fastboot closure
+        if: always()
+        run: |
+          # Three separate regressions that all present as "a feature is
+          # missing/broken at the device" and none of which any earlier step can
+          # see. All three were observed on a real flashed build.
+          #
+          #   a) Menu slot 9. Upstream b9eddda replaced the Language row with a
+          #      PC connection row. Step "Apply upstream source fixes" reverts it
+          #      in the source; this reads the compiled literal, because only the
+          #      binary proves the revert survived the compile.
+          #      The discriminator strings are exact and were cross-checked
+          #      against two real binaries: a verified pre-b9eddda recovery
+          #      carries "Choose the recovery interface language" x1 and
+          #      "Transfer and install ZIPs and images from your computer" x0,
+          #      while the PC-connection build is the mirror image (x0 and x1).
+          #      Both literals come only from the Menu row in the new build, so
+          #      the check is not fooled by the Preferences Language row, which
+          #      b9eddda keeps and which uses the short string "Language".
+          #
+          #   b) Root Manager payload. AERA_ENABLE_ROOT_MANAGER=1 gates both the
+          #      Menu row (tool_scene.cpp) and the copy of
+          #      prebuilt/aera/root into system/etc/aera/root-providers
+          #      (aera_build.mk). The device tree sets it, so both must be
+          #      present. The providers ride along because the flag is a single
+          #      on/off for all three.
+          #
+          #      Read the strings carefully: the Menu row's own text
+          #      ("Patch init_boot and manage KernelSU modules") CANNOT be used
+          #      here. It is static array data in tool_scene.cpp, so it is in the
+          #      binary whether or not the feature is on -- measured x1 on a real
+          #      build with AERA_ENABLE_ROOT_MANAGER=0. The strings that do
+          #      discriminate come from root_manager.cpp, and they are absent
+          #      when the flag is 0 because root::Enabled() is
+          #      `inline constexpr bool` returning a literal through #if, which
+          #      makes the Probe()/Run() early return unconditional and lets the
+          #      compiler delete everything downstream -- including
+          #      LoadBundledRelease() and the kBundledRoot path constant.
+          #      Measured across two real binaries: a build with the flag on
+          #      carries root-providers x2, sukisu-ultra x1 and kernelsu-next x1;
+          #      the flag-off build carries x0 of each. So presence here is a
+          #      sound assertion and absence is the exact failure this device hit.
+          #
+          #   c) fastboot closure. "Reboot to bootloader" lands back in recovery
+          #      on this port, and the reason is that the reboot target is
+          #      written to /misc while the userspace fastboot gadget is only
+          #      bound by an upstream init.rc action whose trigger depends on
+          #      sys.usb.ffs.ready. This check does not prove fastboot works on
+          #      the device -- only a device test can -- but it does pin the
+          #      closure, so a build that silently drops fastbootd, the fastboot
+          #      HAL stubs, the gadget function or the /misc fstab entry fails
+          #      here instead of after a flash.
+          work="${{ steps.vol.outputs.work }}"
+          root="$work/aera/out/target/product/astonc/recovery/root"
+          bin="$work/aera/out/target/product/astonc/system/bin/recovery"
+          if [ ! -f "$bin" ]; then
+            bin="$root/system/bin/recovery"
+          fi
+          if [ ! -f "$bin" ]; then
+            echo "::error::recovery binary not found; cannot verify the Menu"
+            exit 1
+          fi
+          fail=0
+
+          echo "--- Menu slot 9 (want the Language row) ---"
+          # Only the positive direction is checkable from the binary.
+          #
+          # "Choose the recovery interface language" is used by exactly one
+          # thing in the whole tree: the Menu Language row. It also appears in
+          # the localization catalog, but that ships as a compressed kData[]
+          # blob (catalog_generated.cpp), so it is not a plain string in the
+          # image -- measured x0 on the run that had the PC connection row and
+          # x1 on a build from before the Menu was changed. Presence is therefore
+          # a sound signal that the revert reached the compiled array.
+          #
+          # The negative direction is NOT checkable here, and asserting on it
+          # would fail every build: the PC row's own description
+          # ("Transfer and install ZIPs and images from your computer") is shared
+          # with BuildPcConnection() in the same file and with the PC pairing
+          # panel in engine.cpp, neither of which the revert touches. That string
+          # is x1 in the PC-connection build and would still be x1 after the
+          # revert. The absence of the PC row is enforced at the source level by
+          # scripts/restore-menu-language.py and re-checked right after it runs.
+          n_lang=$(strings -a "$bin" | grep -cF 'Choose the recovery interface language' || true)
+          n_pcnote=$(strings -a "$bin" | grep -cF 'Transfer and install ZIPs and images from your computer' || true)
+          echo "  'Choose the recovery interface language'                  x$n_lang (want >= 1)"
+          echo "  'Transfer and install ZIPs and images ...'                  x$n_pcnote (shared with PC panels; not a signal)"
+          if [ "$n_lang" -lt 1 ]; then
+            echo "::error::the Menu Language row is not in the recovery binary; the PC connection revert did not take effect"
+            fail=1
+          fi
+
+          echo "--- Root Manager compiled in (want the provider strings) ---"
+          n_rp=$(strings -a "$bin" | grep -cF 'root-providers' || true)
+          n_su=$(strings -a "$bin" | grep -cF 'sukisu-ultra' || true)
+          n_kn=$(strings -a "$bin" | grep -cF 'kernelsu-next' || true)
+          echo "  'root-providers'  x$n_rp   'sukisu-ultra'  x$n_su   'kernelsu-next'  x$n_kn (want >= 1 each)"
+          if [ "$n_rp" -lt 1 ] || [ "$n_su" -lt 1 ] || [ "$n_kn" -lt 1 ]; then
+            echo "::error::the Root Manager provider paths were dead-code-eliminated; AERA_ENABLE_ROOT_MANAGER is 0 at compile time"
+            echo "          (the Menu row text is NOT a usable signal -- it is static array data and is present either way)"
+            fail=1
+          fi
+          # The runtime property is written on both branches of the #if, so it
+          # only proves data.cpp was compiled -- logged for the record.
+          n_prop=$(strings -a "$bin" | grep -cF 'ro.aera.root_manager.enabled' || true)
+          echo "  'ro.aera.root_manager.enabled'  x$n_prop (informational)"
+
+          echo "--- Root Manager offline providers (want present) ---"
+          if [ -d "$root/system/etc/aera/root-providers" ]; then
+            count=$(find "$root/system/etc/aera/root-providers" -type f | wc -l)
+            echo "  root-providers: $count files"
+            find "$root/system/etc/aera/root-providers" -type f | sed 's|^|    |' | sort
+            if [ "$count" -lt 13 ]; then
+              echo "::error::expected the 12 provider payloads plus providers.json, found $count"
+              fail=1
+            fi
+            for p in providers.json kernelsu kernelsu-next sukisu-ultra; do
+              if [ ! -e "$root/system/etc/aera/root-providers/$p" ]; then
+                echo "::error::$p is missing from root-providers"
+                fail=1
+              fi
+            done
+          else
+            echo "::error::system/etc/aera/root-providers is absent; AERA_ENABLE_ROOT_MANAGER did not reach aera_build.mk"
+            fail=1
+          fi
+          if [ -f "$root/system/etc/aera/.root-providers.stamp" ] || [ -f "$root/system/etc/aera/.root-providers" ]; then
+            echo "  note: the packaging stamp is present (expected, it is how the rule is tracked)"
+          fi
+
+          echo "--- fastboot closure (want present) ---"
+          for f in system/bin/fastbootd \
+                   system/lib64/android.hardware.fastboot@1.0.so \
+                   system/lib64/android.hardware.fastboot@1.1.so \
+                   system/lib64/android.hardware.fastboot-V1-ndk.so \
+                   system/etc/init/hw/init.rc \
+                   system/etc/recovery.fstab; do
+            if [ -e "$root/$f" ]; then
+              echo "  present: $f"
+            else
+              echo "::error::missing from the ramdisk: $f (fastboot would be unreachable)"
+              fail=1
+            fi
+          done
+          # The gadget function and its bind trigger live in the shared init.rc.
+          # Both are required: the function is created on post-fs and the UDC is
+          # only bound from the sys.usb.config=fastboot action.
+          if ! grep -q 'functions/ffs.fastboot' "$root/system/etc/init/hw/init.rc"; then
+            echo "::error::init.rc no longer creates functions/ffs.fastboot; the fastboot gadget cannot enumerate"
+            fail=1
+          fi
+          if ! grep -q 'sys.usb.config=fastboot' "$root/system/etc/init/hw/init.rc"; then
+            echo "::error::init.rc no longer has the sys.usb.config=fastboot action; the UDC is never bound as fastboot"
+            fail=1
+          fi
+          # /misc has to stay in the fstab: the bootloader reboot target is
+          # written there by init (libbootloader_message), and a member that is
+          # not in the fstab cannot be written by the recovery.
+          if ! grep -qE '^[^#]*[[:space:]]/misc[[:space:]]' "$root/system/etc/recovery.fstab"; then
+            echo "::error::/misc is not in recovery.fstab; the bootloader reboot target cannot be written"
+            fail=1
+          fi
+          echo "  init.rc gadget + fastboot trigger + /misc fstab: ok"
+
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::the Menu revert, the Root Manager payload or the fastboot closure is incomplete"
+            exit 1
+          fi
+          echo "Menu Language restored, Root Manager packaged, fastboot closure intact"
 
       - name: Show disk curve and build log tail
         if: always()
