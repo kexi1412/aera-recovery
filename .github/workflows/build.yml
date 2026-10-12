@@ -386,8 +386,14 @@ jobs:
           #    the symbols everything else resolves against; cnss2 owns the PCIe
           #    endpoint and qca_cld3_kiwi_v2 is the only chip driver that binds
           #    this silicon (the non-_v2 kiwi refuses it).
+          #
+          #    Tested against the extracted value of the assignment, not against
+          #    the whole file. The surrounding commentary names cfg80211.ko and
+          #    mac80211.ko in prose, so grepping the file would keep passing
+          #    after both had been dropped from the list.
+          bc_mods=$(grep -oE '^TW_LOAD_VENDOR_MODULES[[:space:]]*:?=[[:space:]]*"[^"]*"' "$bc" | sed 's/.*"\(.*\)"/\1/')
           for m in cfg80211.ko mac80211.ko cnss2.ko qca_cld3_kiwi_v2.ko; do
-            if ! grep -q "$m" "$bc"; then
+            if ! printf '%s\n' "$bc_mods" | tr ' ' '\n' | grep -qxF "$m"; then
               echo "::error::TW_LOAD_VENDOR_MODULES does not list $m"
               fail=1
             fi

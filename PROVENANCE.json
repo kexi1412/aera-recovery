@@ -18,7 +18,7 @@
     },
     {
       "path": ".github/workflows/build.yml",
-      "sha256": "68414899b6ca93215a58ea77966b1ab4c18176f697d4548836de31e40a6bafd7"
+      "sha256": "32393a1035cc4692daad703b3f09090cc94e961817867f622c60b20b4546e784"
     },
     {
       "path": ".gitignore",
