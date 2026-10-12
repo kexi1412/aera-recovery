@@ -192,8 +192,9 @@ BOARD_VENDOR_SEPOLICY_DIRS += $(DEVICE_PATH)/sepolicy
 # ---------------------------------------------------------------------------
 # Kernel module loading (Wi-Fi / QCA6490)
 # ---------------------------------------------------------------------------
-# These are set HERE rather than only in aera_astonc.mk, and the reason is the
-# evaluation order of bootable/recovery/aera_config.mk.
+# These are set HERE as well as in aera_astonc.mk. An earlier revision of this
+# comment claimed the aera_config.mk mapping might not fire at all; the include
+# order was traced afterwards and that claim was wrong. The real situation:
 #
 # That file is the intended translation layer from the public AERA_* namespace
 # to the internal names the inherited recovery code consumes. Its mapper is an
@@ -204,36 +205,42 @@ BOARD_VENDOR_SEPOLICY_DIRS += $(DEVICE_PATH)/sepolicy
 #     $(2) := $$(AERA_$(1))
 #     endef
 #
-# `:=` expands at parse time, so the AERA_* value must already be defined at the
-# moment aera_config.mk is read. That file is included from
-# build/make/core/config.mk, which has its own include order (envsetup.mk at
-# :419, the aera_config.mk include at :478), while device.mk -> aera_astonc.mk
-# is product configuration and is read at a different point. Whether the product
-# side is evaluated before :478 could NOT be verified in this environment - both
-# the GitHub fetch and a local clone of AERA-Recovery/android_build_make failed
-# here - so it is recorded as an open question, not as a proven defect.
+# and it DOES fire. Traced in build/make/core:
+#   config.mk:419  include envsetup.mk
+#   envsetup.mk:351  include product_config.mk
+#   product_config.mk:233-234  $(call import-products, $(current_product_makefile))
+#   product.mk:588 import-products -> node_fns.mk:246 import-nodes
+#   node_fns.mk:190  $(eval include $(2))   <- immediate, so aera_astonc.mk is
+#                                              fully evaluated right here
+#   envsetup.mk:368  include board_config.mk
+#   board_config.mk:244  include $(board_config_mk)   <- BoardConfig.mk read
+#   config.mk:478-479  include bootable/recovery/aera_config.mk
 #
-# The previously shipped recovery.img does not settle it either: it was built at
-# 00:51 while the commit that first added a module list and the Wi-Fi init
-# scripts (5d614cd) is timestamped 08:24, so it predates the configuration being
-# discussed. Its ramdisk has no wpa_supplicant, no dhcptool, no
-# init.recovery.wifi.rc and no ffs.mtp, and its binary has none of the loader's
-# strings - all consistent with it simply being an older build, and therefore
-# not usable as evidence about aera_config.mk.
+# 419 comes before 478, so by the time aera_config.mk is read both AERA_* and
+# this file have been evaluated and the mapping assigns.
 #
-# Setting the internal names here is correct whichever way that ordering
-# resolves, and that is the argument for it:
-#   * BoardConfig.mk is read during board configuration, and every Android.mk is
-#     parsed after config.mk has finished, so these values are unconditionally
-#     in scope for the loader gate at bootable/recovery/Android.mk:362
+# The consequence runs the other way from what one might assume: because `:=` is
+# an immediate assignment and aera_config.mk is read LAST, the mapping OVERWRITES
+# whatever this file sets. That is harmless only while the two lists agree, which
+# is why aera_astonc.mk carries the identical 9-module list and why the CI gate
+# compares the two.
+#
+# This file is still the right place to set them, for two independent reasons:
+#   * Every Android.mk is parsed after config.mk has finished, so these values
+#     are unconditionally in scope for the loader gate at
+#     bootable/recovery/Android.mk:362
 #       ifneq ($(strip $(TW_LOAD_VENDOR_MODULES) $(TW_POST_DECRYPT_MODULES)),)
-#     and for the Wi-Fi gate at Android.mk:72. If the AERA_* mapping does work,
-#     these assignments agree with it and change nothing.
+#     and for the Wi-Fi gate at Android.mk:72 - immune to any future change in
+#     the ordering above.
 #   * The reference tree for this platform does the same thing -
 #     twrp_device_oplus_sm8550 BoardConfig.mk:237-238 sets
 #     TW_LOAD_VENDOR_MODULES and TW_LOAD_VENDOR_MODULES_EXCLUDE_GKI in
 #     BoardConfig.mk, with the same double quoting - so this is the established
 #     shape for the platform rather than a local invention.
+#
+# BoardConfig.mk does not need to be careful about a readonly clash here:
+# board_config.mk:22-33 _board_strip_readonly_list lists only BOARD_* names, so
+# TW_LOAD_VENDOR_MODULES is not readonly and assigning it is legal.
 #
 # The quotes matter and must be kept: LOCAL_CFLAGS carries
 # -DTW_LOAD_VENDOR_MODULES="cfg80211.ko ..." as a single shell word, the

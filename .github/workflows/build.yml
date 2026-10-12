@@ -173,10 +173,18 @@ jobs:
           fi
           mkdir -p "$work/tmp"
 
-          # Swap goes on any volume other than the build volume - but on
-          # ubuntu-22.04 /mnt and /home are both the root filesystem, so in
-          # practice this lands on root and competes with the build anyway.
-          # That is why the size below is capped at 8G rather than 16G.
+          # Swap goes on whichever volume is NOT chosen for the build. On
+          # ubuntu-22.04 that is cosmetic: /mnt, /home and / all report the same
+          # 115GiB free because all three are /dev/root, so swap competes with
+          # the tree regardless. The observed warning "no volume beat root;
+          # building in the workspace" is therefore expected, not a bug.
+          #
+          # An earlier revision of this comment used that fact to justify capping
+          # swap at 8G. That cap is what killed run 38194850592 (swap pinned at
+          # 8191MB, 1.0GB free RAM, exit 143 at +8.3m into the compile), so the
+          # cap is gone and the Add swap step now asks for 16G - the size both
+          # successful runs used - paying for it with the .repo removal rather
+          # than with memory.
           swap_root="${other:-/home}"
           if [ "$swap_root" = "$best" ]; then swap_root=/home; fi
 
@@ -229,8 +237,12 @@ jobs:
 
       - name: Add swap
         run: |
-          # systemd-oomd is the single most likely cause of the silent death in
-          # run 38134563574, and it costs nothing to remove.
+          # systemd-oomd was one candidate for the silent death in run
+          # 38134563574. Run 38194850592 has ruled it out: this step ran, printed
+          # "systemd-oomd stopped (or absent)", and the job was still SIGTERMed
+          # at step 16. Keep the stop - it costs nothing - but oomd was not the
+          # cause, and the real one is visible in the heartbeat curve below
+          # rather than in dmesg. See the swap sizing further down.
           #
           # That run reached 99% 130/131 of the Go bootstrap, printed nothing
           # for 337 seconds while soong_build analysed the tree - the most
@@ -260,23 +272,81 @@ jobs:
           # Report the exact knob that remains, so the next run can be compared.
           cat /proc/pressure/memory 2>/dev/null || echo "no PSI memory pressure support"
 
-          # Swap lives on whichever volume the build is NOT using, so 16G does
-          # not compete with the AOSP tree for the same space. Nothing here may
-          # fail the job: a missing swapfile only risks an OOM later, whereas
-          # exiting now guarantees no image at all.
+          # Swap lives on $swap_root. Note that on ubuntu-22.04 that is NOT a
+          # separate volume: the probe reports /mnt and /home both at the same
+          # free space as / because all three are /dev/root, so an earlier
+          # comment here claiming swap "lives on whichever volume the build is
+          # NOT using" was wrong and is corrected. Swap therefore does compete
+          # with the tree for space, and the number below has to be affordable.
+          # Nothing here may fail the job: a missing swapfile only risks an OOM
+          # later, whereas exiting now guarantees no image at all.
           swap_root="${{ steps.vol.outputs.swap_root }}"
           swap="$swap_root/swapfile"
           sudo swapoff -a || true
           sudo rm -f /swapfile "$swap" || true
 
-          # Size the swapfile from what is actually free instead of hardcoding
-          # 16G. This volume also has to hold the AOSP tree and out/, and
-          # fallocate reserves real blocks, so a fixed 16G is 16G genuinely
-          # gone. Cap at 8G: the runner has ~16G RAM and the compile runs -j4,
-          # so 8G is ample headroom.
+          # HARD LESSON from run 38194850592 (sha b3fae9d, 2026-10-12). This
+          # block used to request 8G, chosen in commit 5c5e8b0 to save disk when
+          # .repo removal was being introduced. That run was SIGTERMed inside
+          # step 16 with exit 143 exactly like the earlier ones, and because the
+          # sampler is streamed the curve survived to say why:
+          #
+          #   heartbeat 0m00s | disk 52G | mem avail 14910MB | swap used    1MB
+          #   heartbeat 2m00s | disk 51G | mem avail 12087MB | swap used    1MB
+          #   heartbeat 4m00s | disk 51G | mem avail  1110MB | swap used 6136MB
+          #   heartbeat 6m00s | disk 51G | mem avail  1039MB | swap used 7730MB
+          #   heartbeat 8m00s | disk 51G | mem avail  1036MB | swap used 8191MB
+          #   ##[error]Process completed with exit code 143.
+          #
+          # Disk never moved off 51G, so space was not the cause. Swap hit
+          # 8191MB against an 8192MB file - the ceiling of this very variable -
+          # while free memory sat at 1.0GB. The job died of memory exhaustion in
+          # the soong_build analysis phase, the same 130/131 point that killed
+          # run 38134563574.
+          #
+          # The two failure modes are now both measured and they need opposite
+          # fixes, which is why this comment is long:
+          #
+          #   run 38194850592 (sha b3fae9d, .repo removed, 8G swap)
+          #     MEMORY. Died +8.3m into the compile, swap pinned at its 8191MB
+          #     ceiling, 1.0GB free RAM, disk steady at 51G.
+          #
+          #   run 38100739430 (sha 38100739, no .repo removal, 16G swap)
+          #     DISK. Died at 23819/29834 (79%) after 94m and its job annotation
+          #     is the proof - the runner agent failing to write its own log:
+          #       System.IO.IOException: No space left on device :
+          #       '/home/runner/actions-runner/cached/2.337.0/_diag/...log'
+          #     Without the .repo removal it carried the extra 18G git object
+          #     store on top of tree + 16G swap and the volume filled. That is
+          #     why the .repo removal step exists.
+          #
+          # That same run is the proof that 16G swap is ENOUGH for the WLAN
+          # build. It had the full Wi-Fi graph - 29834 tasks including
+          # external/wpa_supplicant_8 and rclone, versus 28452 without Wi-Fi -
+          # and it cleared the soong bootstrap at 130/131 that killed b3fae9d,
+          # then compiled to 79%. Memory was never its problem; only disk was.
+          # Its "Swap: 15Gi 0B 15Gi" never moved.
+          #
+          # So the fix is to take the memory envelope from that run (16G swap,
+          # the size both successful runs also used) and the disk fix from the
+          # other (.repo removal), because they compose: rm -rf .repo frees 18G
+          # while the larger swapfile only costs 8G.
+          #
+          # Headroom: 51GiB free before compiling was measured with .repo removed
+          # and an 8G swapfile, so the same build with a 16G swapfile has ~43G.
+          # The disk-death configuration had the 18G .repo object store instead
+          # of that headroom, which is what made the difference between the two
+          # runs. Both fixes therefore reinforce rather than trade against each
+          # other, and no earlier measurement showed out/ for a recovery-only
+          # build ever approaching 43G.
+          #
+          # The caps below remain the safety net: on a smaller volume they shrink
+          # swap and warn instead of letting the build wedge on disk space, which
+          # keeps the failure mode OOM - recoverable by retrying - rather than
+          # a full volume that no retry can fix.
           avail_k=$(df -Pk "$swap_root" 2>/dev/null | awk 'NR==2 {print $4}')
           case "$avail_k" in ''|*[!0-9]*) avail_k=0;; esac
-          want_k=$(( 8 * 1024 * 1024 ))
+          want_k=$(( 16 * 1024 * 1024 ))
           quarter_k=$(( avail_k / 4 ))
           head_k=$(( avail_k - 8*1024*1024 ))
           # Written as if/else rather than `[ .. ] && x=..` on purpose: Actions
@@ -357,11 +427,37 @@ jobs:
           # Why this is a checked invariant and not a comment: the build
           # succeeds and produces a plausible recovery image whether or not the
           # loader is compiled in, so nothing short of an explicit check catches
-          # a lost variable. The module list reaches the compiler only through
-          # BoardConfig.mk, because the AERA_* -> TW_* mapping in
-          # bootable/recovery/aera_config.mk is an immediate assignment behind an
-          # origin guard (aera_config.mk:7-11) whose evaluation order relative to
-          # product configuration is not reliable.
+          # a lost variable.
+          #
+          # On BoardConfig.mk versus the AERA_* mapping: an earlier revision of
+          # this comment claimed the mapping in bootable/recovery/aera_config.mk
+          # was unreliable because of evaluation order. That was wrong. The
+          # include order was traced in build/make and the mapping does fire:
+          # config.mk:419 pulls in envsetup.mk, envsetup.mk:351 pulls in
+          # product_config.mk, which at :233-234 calls import-products on the
+          # current product makefile, and node_fns.mk:190 uses
+          # `$(eval include $(2))` - an immediate include - so aera_astonc.mk is
+          # fully evaluated there. envsetup.mk:368 then pulls in board_config.mk,
+          # which at :244 includes BoardConfig.mk. config.mk:478-479 includes
+          # aera_config.mk AFTER all of that, so AERA_* is defined and
+          # `$(2) := $(AERA_$(1))` assigns.
+          #
+          # The catch is that this same 419-before-478 ordering means the mapping
+          # OVERWRITES BoardConfig.mk, because `:=` is an immediate assignment
+          # and aera_config.mk runs later. That is fine only while the two agree.
+          # Both files carry the identical 9-module list, which check 8 below
+          # enforces, so the overwrite is currently harmless and the check is
+          # what keeps it harmless.
+          #
+          # Two independent reasons BoardConfig.mk is still the right place to
+          # set these:
+          #   * Every Android.mk is parsed after config.mk finishes, so the value
+          #     is unconditionally in scope for the loader gate at
+          #     bootable/recovery/Android.mk:362 and the Wi-Fi gate at
+          #     Android.mk:72, whichever way any future ordering changes fall.
+          #   * The reference tree for this platform does exactly this -
+          #     twrp_device_oplus_sm8550 BoardConfig.mk:237-238 - so it is the
+          #     established shape rather than a local invention.
           dt="$GITHUB_WORKSPACE/device_tree"
           bb="${{ steps.vol.outputs.work }}/aera"
           bc="$dt/BoardConfig.mk"

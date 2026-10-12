@@ -101,25 +101,33 @@ AERA_LOAD_VENDOR_MODULES_EXCLUDE_GKI := true
 #     ifneq ($(strip $(TW_LOAD_VENDOR_MODULES) $(TW_POST_DECRYPT_MODULES)),)
 # to decide whether kernel_module_loader.cpp is compiled at all.
 #
-# aera_config.mk is supposed to derive that name from this one, but its mapper
-# is an immediate assignment behind an origin guard (aera_config.mk:7-11):
+# aera_config.mk derives that name from this one. Its mapper is an immediate
+# assignment behind an origin guard (aera_config.mk:7-11):
 #     define aera-map-config
 #     ifneq ($$(origin AERA_$(1)),undefined)
 #     $(2) := $$(AERA_$(1))
 #     endef
-# and aera_config.mk is included from build/make/core/config.mk, whereas this
-# file is product configuration read at a different point in the same file's
-# include order. Whether this file has been evaluated by the time that include
-# runs could not be verified here (both the GitHub fetch and a local clone of
-# AERA-Recovery/android_build_make failed in this environment), so the mapping
-# must be treated as unreliable rather than assumed to work.
 #
-# Therefore BoardConfig.mk sets TW_LOAD_VENDOR_MODULES, TW_LOAD_VENDOR_MODULES_
-# EXCLUDE_GKI and OF_ENABLE_WLAN directly, which is immune to that ordering
-# because BoardConfig.mk is read during board configuration and every Android.mk
-# is parsed after config.mk completes. The values here remain the documented
-# public interface, and the AERA_LOAD_VENDOR_MODULES list is kept in sync with
-# BoardConfig.mk so the two cannot drift into disagreeing.
+# An earlier revision of this comment said that mapping might not fire because
+# this file might not be evaluated by the time aera_config.mk is read. That was
+# wrong. The include order was traced in build/make: config.mk:419 includes
+# envsetup.mk, envsetup.mk:351 includes product_config.mk, which at :233-234
+# calls import-products; node_fns.mk:190 does `$(eval include $(2))`, an
+# immediate include, so THIS file is fully evaluated there; envsetup.mk:368 then
+# includes board_config.mk, which at :244 includes BoardConfig.mk; and only at
+# config.mk:478-479 is aera_config.mk read. So AERA_* is defined in time and the
+# mapping does assign.
+#
+# Note what that ordering means: the mapping runs LAST and `:=` is immediate, so
+# it OVERWRITES BoardConfig.mk. Harmless only while the two agree - hence the
+# identical list below and the CI gate that compares them.
+#
+# BoardConfig.mk still sets the internal names directly, which is the established
+# shape for this platform (twrp_device_oplus_sm8550 BoardConfig.mk:237-238) and
+# is immune to future ordering changes because every Android.mk is parsed after
+# config.mk completes. The values here remain the documented public interface,
+# and the AERA_LOAD_VENDOR_MODULES list is kept in sync with BoardConfig.mk so
+# the two cannot drift into disagreeing.
 #
 # Keep the quotes: the value reaches the compiler as
 # -DTW_LOAD_VENDOR_MODULES="cfg80211.ko ..." and twcommon.h:37-38
