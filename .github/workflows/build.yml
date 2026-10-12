@@ -777,7 +777,9 @@ jobs:
           echo "--- recovery module loader (must be compiled out) ---"
           absent "Attempting to load modules"
           absent "Checking directory: "
+          absent "Modules Loaded: "
           absent "modules.load.twrp"
+          absent "/vendor/lib/modules"
           absent "/vendor_dlkm/lib/modules"
 
           echo "--- QCA6490 / Wi-Fi stack (must not be requested) ---"

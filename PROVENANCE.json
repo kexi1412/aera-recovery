@@ -18,7 +18,7 @@
     },
     {
       "path": ".github/workflows/build.yml",
-      "sha256": "9e7c222dfaaeb225eb46d413cc22f6023ec47b091e46790943c6860fade21033"
+      "sha256": "84f041f406b81e2331511edd7cf152d6fd0d8924daf571d9dafe2221df4703e9"
     },
     {
       "path": ".gitignore",
@@ -42,7 +42,7 @@
     },
     {
       "path": "BoardConfig.mk",
-      "sha256": "26bc9ecf763da00e85c31251f450f0884d113e3ec36b034b87f56a2582c2d1fa"
+      "sha256": "2fabe5e0a25d6560724a5c9b749287855748f896824208d47e112237fde382df"
     },
     {
       "path": "LICENSE",
@@ -54,15 +54,15 @@
     },
     {
       "path": "README.md",
-      "sha256": "bee788c8fcc86f790fa339d894145cd24c75a8b93d0648fc007a7228da0dbbe7"
+      "sha256": "7d4584fd129ec0daa0eb514e8798351f05b1449cbde0fd51674b6d10dec78b58"
     },
     {
       "path": "aera_astonc.mk",
-      "sha256": "c3f51ec170fabe69322b5901a7cc6d9ec38dbd6a63be4243f075bdbe2f657b60"
+      "sha256": "080adcc09b6f5627cbc43a0b9ec0a61fd1a85b84a6f47c5d1d71f33dacf5672f"
     },
     {
       "path": "config/README.md",
-      "sha256": "20bf2acb917d6f679fa3ea54d1de995ef277bd2994f405038485ffa8529ec0c4"
+      "sha256": "851f94da6b70235c207b280a42b41347b8930838362cb284c074aaa28c18f8f0"
     },
     {
       "path": "config/crypto-device-permissions.json",
@@ -118,15 +118,11 @@
     },
     {
       "path": "recovery/root/init.recovery.qcom.rc",
-      "sha256": "fa4253e8dea762bac0168f07b769963bffc3fea2e7da1d6d458cb7204f244201"
+      "sha256": "db30b37028a6e009a04c8f121b3f44b360527fa7729173964fc7886f347af64e"
     },
     {
       "path": "recovery/root/init.recovery.usb.rc",
       "sha256": "bf83625da020ae6541ce5577e422ed5ebdcb203f51259f8fc414ccc2674faaa0"
-    },
-    {
-      "path": "recovery/root/init.recovery.wifi.rc",
-      "sha256": "1540260ebb85784a528bab341512bf849d2512b2ee4e30a43eec5828f1e08b63"
     },
     {
       "path": "recovery/root/linkerconfig/ld.config.txt",
@@ -135,10 +131,6 @@
     {
       "path": "recovery/root/system/bin/astonc-cpu-sensor",
       "sha256": "3f1aa4f31450a299a8e08e30f289ff5d41f1d02f9c39fe3741e576dfad9ddd56"
-    },
-    {
-      "path": "recovery/root/system/bin/beforemodules.sh",
-      "sha256": "d392af5f81484838c390f9cd78095522c6700cd5c83d511b7f624e061f35b3ec"
     },
     {
       "path": "recovery/root/system/etc/.gitkeep",
@@ -166,7 +158,7 @@
     },
     {
       "path": "recovery/root/system/etc/recovery.fstab",
-      "sha256": "5624424216619560f9283c4ca337a337517869e89911b35178e49a83a886fee1"
+      "sha256": "4e7c52a2e0e45e0973516dcc1fe9f1d9da2dd0d02c0f14c1ed29906896a73e0d"
     },
     {
       "path": "recovery/root/system/etc/twrp.flags",
@@ -190,7 +182,7 @@
     },
     {
       "path": "recovery/root/vendor/etc/ueventd.rc",
-      "sha256": "8e6585e318af4ee743047d3fc059260865c469474922d6c35403319a02ec2e7f"
+      "sha256": "99dc2a5d87474e3b9c9641178a81876671f541681bf8d0929e7c421cb6fda5d6"
     },
     {
       "path": "recovery/root/vendor/etc/vintf/compatibility_matrix.xml",
