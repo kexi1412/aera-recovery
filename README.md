@@ -29,11 +29,31 @@ fastbootd 只读查询及返回、Sideload 连接/取消返回。
 震动无效，用户接受暂缓。SELinux 保留上游/debug 的八个
 permissive domains，尚不是全域 enforcing。
 
-MTP 与 WiFi 已从"关闭"改为构建进镜像：MTP 走 FunctionFS（`/dev/usb-ffs/mtp`
-+ `sys.usb.config=mtp,adb`），WiFi 走 `wlan0` + wpa_supplicant。
+MTP 构建进镜像：走 FunctionFS（`/dev/usb-ffs/mtp` + `sys.usb.config=mtp,adb`）。
 `AERA_ADVANCED_SECURITY` 必须保持未设置——它会在启动时打印
 "ADB & MTP disabled by maintainer" 并跳过 `Enable_MTP()`。**本树尚未在真机
-刷入验证这两项**，刷入后需确认 `tw_mtp_enabled` 与 `wlan0` 是否就绪。
+刷入验证 MTP**，刷入后需确认 `tw_mtp_enabled` 是否就绪。
+
+**WiFi 已于 `dc9122f` 整体移除，不要按 `wlan0` + `wpa_supplicant` 去找它。**
+移除原因与验证结论：
+
+- 原归因为"recovery 里加载 QCA6490 模块栈导致解密后进 9008"。
+  该归因**已被证伪**：取证镜像 `oplusreserve5.img` 的最晚日志时间为
+  2026-10-08 22:05:49，而 Wi-Fi 改动提交于 2026-10-11 08:24:05——
+  **样本早于改动 3 天**，且镜像内 `wpa_supplicant`/`insmod`/`Attempting to
+  load modules` 命中均为 0。
+- 镜像里真实的失败是 keystore2 的 VINTF 声明失败（`Found
+  android.system.keystore2` = 0，`received signal 6` ×88），
+  该缺陷由 `cd60bd9`（2026-10-10 19:57）修复，**比 Wi-Fi 改动还早**。
+- 本次移除的真实目的是**回到唯一经真机验证的配置 `95e0b23`（CI run #10，
+  用户实测可解密 `/data`）**。该配置同时不含 Wi-Fi 与 module loader。
+  移除后连带不再编译 `rclone_prebuilt` 与 `fusermount3`（上游把二者挂在
+  `OF_ENABLE_WLAN` 块内），磁盘占用随之下降。
+- 若将来要恢复 Wi-Fi，注意三者是**联动**的：`TW_LOAD_VENDOR_MODULES`
+  （loader 门禁）、`OF_ENABLE_WLAN`（编译门禁）、`recovery/root` 下的
+  hook 与 init rc 必须一起动。只开一半的表现是**卡死**而非功能缺失。
+  CI 的 `Verify Wi-Fi is fully removed from the build configuration` 步骤
+  会对重新引入的任一半配置直接失败。
 
 ## 编译
 
