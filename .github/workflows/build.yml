@@ -734,7 +734,7 @@ jobs:
           # because the shared upstream action never unbinds the UDC first and
           # dies on this device with "symlink() failed: File exists" and
           # "Device or resource busy" (9008 kmsg, /init.recovery.usb.rc:100-101).
-          usbrc=recovery/root/init.recovery.usb.rc
+          usbrc=device_tree/recovery/root/init.recovery.usb.rc
           if ! grep -qF 'on property:sys.usb.config=fastboot && property:sys.usb.ffs.ready=1 && property:sys.usb.configfs=1' "$usbrc"; then
             echo "::error::$usbrc has no fastbootd bind handler"
             exit 1
