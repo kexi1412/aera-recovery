@@ -765,6 +765,56 @@ jobs:
           done
           echo "fastbootd bind owns the gadget teardown; the MTP handlers are intact"
 
+          # Power handoff: the BCB fix above lets init *accept* the reboot
+          # request, but the graphics thread still has to *deliver* it. On this
+          # device the early UI thread runs Adreno EGL TLS destructors on exit,
+          # and that teardown blocks inside the vendor library before the
+          # recovery core can call request_power_control(). The device flashes
+          # the transition screen and stays in recovery exactly as before -- same
+          # symptom, one layer deeper.
+          #
+          # Ported from KAI-Miru/android_device_oneplus_guacamole-AERA 8e9db27:
+          # terminal actions (reboot/bootloader/fastboot/power-off) hand their
+          # result to the recovery backend through a condition variable while
+          # the graphics thread parks in pause() instead of exiting. init then
+          # receives the power request and reboots; the thread dies with the
+          # process.
+          python3 device/oneplus/astonc/scripts/fix-power-handoff.py bootable/recovery
+
+          runner=bootable/recovery/aeraui/core/runner.cpp
+          if ! grep -qF 'bool IsTerminalResult(RunResult result)' "$runner"; then
+            echo "::error::IsTerminalResult helper is missing from runner.cpp"
+            exit 1
+          fi
+          if ! grep -qF 'gEarlyCondition' "$runner"; then
+            echo "::error::gEarlyCondition condition variable is missing from runner.cpp"
+            exit 1
+          fi
+          if ! grep -qF 'gEarlyFinished' "$runner"; then
+            echo "::error::gEarlyFinished flag is missing from runner.cpp"
+            exit 1
+          fi
+          if ! grep -qF 'for (;;) pause();' "$runner"; then
+            echo "::error::the pause() keep-alive loop is missing from runner.cpp"
+            exit 1
+          fi
+          if ! grep -qF 'terminal action handed off with graphics thread alive' "$runner"; then
+            echo "::error::the power handoff marker string is missing from runner.cpp"
+            exit 1
+          fi
+          if grep -qF 'bool run_inline = false;' "$runner"; then
+            echo "::error::the old lock_guard join path survived in RunAeraUi"
+            exit 1
+          fi
+          # The condition_variable wait must replace the old join, not sit
+          # alongside it.
+          n=$(grep -cF 'gEarlyCondition.wait' "$runner")
+          if [ "$n" -ne 1 ]; then
+            echo "::error::expected exactly one gEarlyCondition.wait in runner.cpp, found $n"
+            exit 1
+          fi
+          echo "Terminal actions hand off with the graphics thread alive (pause loop)"
+
       - name: Build recovery
         env:
           # Passed through env rather than interpolated into the script, so a
@@ -1291,11 +1341,27 @@ jobs:
           fi
           echo "  init.rc gadget + fastboot trigger + /misc fstab: ok"
 
+          #   d) Power handoff. The BCB clear (fix-reboot-fastboot.py) lets
+          #      init *accept* the reboot request, but the graphics thread has
+          #      to *deliver* it. Without the power handoff repair the early UI
+          #      thread exits and runs Adreno EGL TLS destructors that block
+          #      before request_power_control() is reached, so the device stays
+          #      in recovery. The marker string proves the patch survived the
+          #      compile; measured x1 on a patched binary, x0 on an unpatched
+          #      one.
+          echo "--- power handoff marker (want present) ---"
+          n_ph=$(strings -a "$bin" | grep -cF 'terminal action handed off with graphics thread alive' || true)
+          echo "  'terminal action handed off...'  x$n_ph (want >= 1)"
+          if [ "$n_ph" -lt 1 ]; then
+            echo "::error::the power handoff marker is absent from the recovery binary; fix-power-handoff.py did not reach the compile"
+            fail=1
+          fi
+
           if [ "$fail" -ne 0 ]; then
-            echo "::error::the Menu revert, the Root Manager payload or the fastboot closure is incomplete"
+            echo "::error::the Menu revert, the Root Manager payload, the fastboot closure or the power handoff is incomplete"
             exit 1
           fi
-          echo "Menu Language restored, Root Manager packaged, fastboot closure intact"
+          echo "Menu Language restored, Root Manager packaged, fastboot closure intact, power handoff embedded"
 
       - name: Show disk curve and build log tail
         if: always()
