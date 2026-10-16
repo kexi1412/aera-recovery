@@ -734,7 +734,13 @@ jobs:
           # because the shared upstream action never unbinds the UDC first and
           # dies on this device with "symlink() failed: File exists" and
           # "Device or resource busy" (9008 kmsg, /init.recovery.usb.rc:100-101).
-          usbrc=device_tree/recovery/root/init.recovery.usb.rc
+          # Path caveat: this step runs with cwd = "$work/aera" (the AOSP tree),
+          # where "device_tree/" does not exist -- that is the checkout directory
+          # name and lives under $GITHUB_WORKSPACE. "Install device tree" copies
+          # it to device/oneplus/astonc, so assert against the installed copy.
+          # Reading device_tree/... here failed with "has no fastbootd bind
+          # handler" on every run while the file was in fact correct (run #32).
+          usbrc=device/oneplus/astonc/recovery/root/init.recovery.usb.rc
           if ! grep -qF 'on property:sys.usb.config=fastboot && property:sys.usb.ffs.ready=1 && property:sys.usb.configfs=1' "$usbrc"; then
             echo "::error::$usbrc has no fastbootd bind handler"
             exit 1
