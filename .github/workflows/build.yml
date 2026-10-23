@@ -70,7 +70,10 @@ jobs:
           # Android SDK and hosted toolcache are dead weight. Removing the whole
           # SDK rather than only sdk/ndk is worth roughly 10G more, which is the
           # difference between fitting and not: run 38100739430 died at ~1h with
-          # "No space left on device" once the WiFi targets were added.
+          # "No space left on device" once the WiFi targets were added. (That
+          # graph included rclone's Go build, which upstream has since dropped
+          # for native SMB/SFTP, so the Wi-Fi tree is smaller today - the
+          # cleanup stays because the root volume is still the tightest one.)
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
                       /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" \
                       /opt/hostedtoolcache /usr/local/.ghcup /usr/share/swift || true
@@ -416,84 +419,186 @@ jobs:
           rm -rf device/oneplus/astonc/.github device/oneplus/astonc/.git
           ls device/oneplus/astonc
 
-      - name: Verify Wi-Fi is fully removed from the build configuration
+      - name: Preflight the Wi-Fi build dependencies
         run: |
-          # Counter-check, not a feature gate.
-          #
-          # Removing Wi-Fi touches three coupled places -- the recovery module
-          # loader gate (TW_LOAD_VENDOR_MODULES), the Wi-Fi compile gate
-          # (OF_ENABLE_WLAN) and the ramdisk hook -- and each one fails silently
-          # on its own:
-          #   * a stale TW_LOAD_VENDOR_MODULES still compiles the module loader
-          #     in, which then loads the QCA6490 stack while the fstab is parsed;
-          #   * a stale OF_ENABLE_WLAN still stages wpa_supplicant and still
-          #     expects a sys.aera.wlan.up handler that no longer exists;
-          #   * a stale beforemodules.sh is dead code the loader happily runs.
-          # The device symptom for the middle case is a hang rather than a
-          # missing feature, so a build that "works" is not evidence.
+          # aera_build.mk hard-errors on missing wpa_supplicant_8 sources only
+          # once OF_ENABLE_WLAN is set -- i.e. deep inside the compile, hours
+          # from now. Check the two manifest-provided trees now, while a
+          # failure costs seconds instead of the whole build window.
+          aera="${{ steps.vol.outputs.work }}/aera"
+          fail=0
+          for d in external/wpa_supplicant_8/Android.bp external/libfuse; do
+            if [ -e "$aera/$d" ]; then
+              echo "  present: $d"
+            else
+              echo "::error::$aera/$d is missing from the synced tree; the Wi-Fi targets cannot build"
+              fail=1
+            fi
+          done
+          if [ "$fail" -ne 0 ]; then exit 1; fi
+          echo "wpa_supplicant_8 and libfuse are synced for the Wi-Fi targets"
+
+      - name: Verify the kernel module and Wi-Fi configuration
+        run: |
+          # Feature gate. The Wi-Fi stack cannot come up unless three coupled
+          # things are configured at once -- the module loader gate
+          # (TW_LOAD_VENDOR_MODULES), the Wi-Fi compile gate (OF_ENABLE_WLAN)
+          # and the ramdisk hook -- and each one fails silently on its own:
+          #   * a missing module list compiles kernel_module_loader.cpp out,
+          #     so nothing ever loads the QCA6490 stack and wlan0 never
+          #     appears;
+          #   * a missing OF_ENABLE_WLAN still loads the modules but stages no
+          #     supplicant, which presents as "Wi-Fi does not work" rather
+          #     than as a missing feature;
+          #   * a missing init.recovery.wifi.rc leaves sys.aera.wlan.up
+          #     unconsumed, so nothing ever starts the supplicant service.
+          # Only a check that sees all three together catches a half-apply,
+          # and a half-apply presents as a hang or a missing feature, never
+          # as a build failure. This tree has made that mistake in both
+          # directions (5d614cd added Wi-Fi, dc9122f removed it); the gate
+          # runs before a multi-hour build for exactly that reason.
           #
           # Every check reads the extracted value of an assignment, never the
           # whole file: the surrounding commentary names all of these variables
-          # in prose, so a file-wide grep would keep passing after an assignment
-          # had been re-added.
+          # in prose, so a file-wide grep would keep passing after an
+          # assignment had been dropped.
           dt="$GITHUB_WORKSPACE/device_tree"
           bc="$dt/BoardConfig.mk"
           am="$dt/aera_astonc.mk"
           fail=0
 
-          # 1. The assignments themselves must be gone, not merely commented out.
-          #    `^[[:space:]]*NAME[[:space:]]*:?=` matches both := and =, and
-          #    cannot match a line that starts with '#'. The name is also
-          #    boundary-safe: after it the pattern requires whitespace then
-          #    `:?=`, so AERA_LOAD_VENDOR_MODULES cannot match
-          #    AERA_LOAD_VENDOR_MODULES_EXCLUDE_GKI (the next character there is
-          #    '_', not a space).
-          #
-          #    AERA_LOAD_VENDOR_MODULES_EXCLUDE_GKI is deliberately NOT checked.
-          #    It is not a Wi-Fi switch: the configuration that was verified on
-          #    hardware carried it while carrying no Wi-Fi at all. It only trims
-          #    the module search path for the loader, and with
-          #    TW_LOAD_VENDOR_MODULES unset the loader is compiled out, so the
-          #    value is inert. Checking it here would fail every valid build.
-          for spec in "$bc:TW_LOAD_VENDOR_MODULES" \
-                      "$bc:OF_ENABLE_WLAN" \
-                      "$am:AERA_LOAD_VENDOR_MODULES" \
-                      "$am:AERA_ENABLE_WLAN"; do
-            f="${spec%%:*}"
-            v="${spec##*:}"
-            if grep -qE "^[[:space:]]*${v}[[:space:]]*:?=" "$f"; then
-              echo "::error::$(basename "$f") still assigns $v"
-              grep -nE "^[[:space:]]*${v}[[:space:]]*:?=" "$f" || true
-              fail=1
-            fi
-          done
-
-          # 2. The ramdisk hook and the Wi-Fi init script must not exist. The
-          #    hook is only reachable from kernel_module_loader.cpp, so with the
-          #    loader compiled out it is inert; keeping it would mislead the next
-          #    reader into thinking the loader is on.
-          for f in recovery/root/system/bin/beforemodules.sh \
-                   recovery/root/init.recovery.wifi.rc; do
-            if [ -e "$dt/$f" ]; then
-              echo "::error::$f is back, without the module loader or the Wi-Fi gate that made it meaningful"
-              fail=1
-            fi
-          done
-
-          # 3. Nothing may still import the removed init script. init treats a
-          #    missing import as non-fatal, so this would otherwise pass silently
-          #    and only surface as "why is there no wlan0".
-          if grep -rqs 'init\.recovery\.wifi\.rc' "$dt/recovery/root/"; then
-            echo "::error::a ramdisk init file still imports /init.recovery.wifi.rc"
-            grep -rns 'init\.recovery\.wifi\.rc' "$dt/recovery/root/" || true
+          # 1. The gate variable itself. Android.mk:369 is
+          #    `ifneq ($(strip $(TW_LOAD_VENDOR_MODULES) $(TW_POST_DECRYPT_MODULES)),)`.
+          if ! grep -qE '^[[:space:]]*TW_LOAD_VENDOR_MODULES[[:space:]]*:?=' "$bc"; then
+            echo "::error::BoardConfig.mk does not set TW_LOAD_VENDOR_MODULES; kernel_module_loader.cpp will be compiled out and Wi-Fi cannot work"
             fail=1
           fi
 
-          # 4. The VINTF fix is what makes recovery decrypt, and it is invisible
-          #    until a device boots with an encrypted /data: keystore2 aborts, the
-          #    image still flashes and still boots. Assert the wiring here instead
-          #    of discovering it after a flash. This is the check whose absence
-          #    cost the most.
+          # 2. Quotes. The value is passed through -D and then stringified by
+          #    twcommon.h EXPAND/STRINGIFY, which needs one token sequence.
+          #    Unquoted, only the first module survives.
+          if ! grep -qE '^[[:space:]]*TW_LOAD_VENDOR_MODULES[[:space:]]*:?=[[:space:]]*"' "$bc"; then
+            echo "::error::TW_LOAD_VENDOR_MODULES is not quoted; only the first module would be loaded"
+            fail=1
+          fi
+
+          # 3. Modules that carry the QCA6490 stack. cfg80211 and mac80211 are
+          #    the symbols everything else resolves against; cnss2 owns the PCIe
+          #    endpoint and qca_cld3_kiwi_v2 is the only chip driver that binds
+          #    this silicon (the non-_v2 kiwi refuses it).
+          #
+          #    Tested against the extracted value of the assignment, not against
+          #    the whole file. The surrounding commentary names cfg80211.ko and
+          #    mac80211.ko in prose, so grepping the file would keep passing
+          #    after both had been dropped from the list.
+          bc_mods=$(grep -oE '^TW_LOAD_VENDOR_MODULES[[:space:]]*:?=[[:space:]]*"[^"]*"' "$bc" | sed 's/.*"\(.*\)"/\1/')
+          for m in cfg80211.ko mac80211.ko cnss2.ko qca_cld3_kiwi_v2.ko; do
+            if ! printf '%s\n' "$bc_mods" | tr ' ' '\n' | grep -qxF "$m"; then
+              echo "::error::TW_LOAD_VENDOR_MODULES does not list $m"
+              fail=1
+            fi
+          done
+
+          # 4. The GKI exclusion must be the literal `true` (Android.mk:377),
+          #    in both files: with the loader now compiled in, this switch is
+          #    live, and `1` would silently fail the ifeq and leave the stock
+          #    GKI module directories on the search path.
+          if ! grep -qE '^[[:space:]]*TW_LOAD_VENDOR_MODULES_EXCLUDE_GKI[[:space:]]*:?=[[:space:]]*true[[:space:]]*$' "$bc"; then
+            echo "::error::TW_LOAD_VENDOR_MODULES_EXCLUDE_GKI must be exactly 'true'"
+            fail=1
+          fi
+          if ! grep -qE '^[[:space:]]*AERA_LOAD_VENDOR_MODULES_EXCLUDE_GKI[[:space:]]*:?=[[:space:]]*true[[:space:]]*$' "$am"; then
+            echo "::error::AERA_LOAD_VENDOR_MODULES_EXCLUDE_GKI must be exactly 'true' (1 does not match Android.mk's ifeq)"
+            fail=1
+          fi
+
+          # 5. The loader hook has to exist in the ramdisk, because the load
+          #    order it enforces is what makes the stack resolve.
+          if [ ! -f "$dt/recovery/root/system/bin/beforemodules.sh" ]; then
+            echo "::error::recovery/root/system/bin/beforemodules.sh is missing"
+            fail=1
+          fi
+
+          # 6. The Wi-Fi backend must be enabled with the literal 1.
+          #    bootable/recovery/Android.mk:75 and aera_build.mk:876 both
+          #    compare with `ifeq (...,1)`, so `true` compiles the Wi-Fi
+          #    sources out just as effectively as leaving it unset. Without
+          #    this, wlan0 is brought up by the modules but nothing ever
+          #    starts the supplicant.
+          if ! grep -qE '^[[:space:]]*OF_ENABLE_WLAN[[:space:]]*:?=[[:space:]]*1[[:space:]]*$' "$bc"; then
+            echo "::error::BoardConfig.mk does not set OF_ENABLE_WLAN to the literal 1; the Wi-Fi sources will not be compiled and no supplicant will be staged"
+            fail=1
+          fi
+          if ! grep -qE '^[[:space:]]*AERA_ENABLE_WLAN[[:space:]]*:?=[[:space:]]*1[[:space:]]*$' "$am"; then
+            echo "::error::aera_astonc.mk does not set AERA_ENABLE_WLAN to the literal 1; the public interface value has drifted"
+            fail=1
+          fi
+
+          # 7. The Wi-Fi ramdisk pieces must all be present together: the
+          #    bring-up script (wpa_supplicant service + the sys.aera.wlan.up
+          #    handler), its import, the firmware search path that resolves
+          #    kiwi/amss.bin and wlan/WCNSS_qcom_cfg.ini, and the persist
+          #    mount that supplies that ini.
+          if [ ! -f "$dt/recovery/root/init.recovery.wifi.rc" ]; then
+            echo "::error::recovery/root/init.recovery.wifi.rc is missing; sys.aera.wlan.up would be unconsumed"
+            fail=1
+          fi
+          if ! grep -qs 'import /init.recovery.wifi.rc' "$dt/recovery/root/init.recovery.qcom.rc"; then
+            echo "::error::init.recovery.qcom.rc no longer imports /init.recovery.wifi.rc; init would never parse it"
+            fail=1
+          fi
+          if ! grep -q '/mnt/vendor/persist/' "$dt/recovery/root/vendor/etc/ueventd.rc"; then
+            echo "::error::ueventd.rc lost the /mnt/vendor/persist firmware directory; kiwi firmware and the supplicant ini would not resolve"
+            fail=1
+          fi
+          if ! grep -q '/dev/block/by-name/persist[[:space:]]/mnt/vendor/persist' "$dt/recovery/root/system/etc/recovery.fstab"; then
+            echo "::error::recovery.fstab lost the persist entry; wlan/WCNSS_qcom_cfg.ini would be unmountable"
+            fail=1
+          fi
+
+          # 8. Upstream must still contain the hook, the gates and the
+          #    wlan.cpp contract this configuration relies on. If AERA renames
+          #    them, the configuration has to be re-derived rather than
+          #    silently doing nothing.
+          bb="${{ steps.vol.outputs.work }}/aera"
+          if ! grep -q 'beforemodules.sh' "$bb/bootable/recovery/kernel_module_loader.cpp"; then
+            echo "::error::kernel_module_loader.cpp no longer calls /system/bin/beforemodules.sh; the ramdisk hook is dead code"
+            fail=1
+          fi
+          if ! grep -q 'TW_LOAD_VENDOR_MODULES' "$bb/bootable/recovery/Android.mk"; then
+            echo "::error::bootable/recovery/Android.mk no longer gates on TW_LOAD_VENDOR_MODULES"
+            fail=1
+          fi
+          if ! grep -qE 'ifeq[[:space:]]*\(\$\(OF_ENABLE_WLAN\),1\)' "$bb/bootable/recovery/aera_build.mk"; then
+            echo "::error::aera_build.mk no longer gates the Wi-Fi targets on OF_ENABLE_WLAN==1"
+            fail=1
+          fi
+          if ! grep -q 'sys.aera.wlan.up' "$bb/bootable/recovery/wlan.cpp"; then
+            echo "::error::wlan.cpp no longer raises sys.aera.wlan.up; init.recovery.wifi.rc's handler would never fire"
+            fail=1
+          fi
+
+          # 9. The list in aera_astonc.mk and the list in BoardConfig.mk must
+          #    agree. Two declarations of one truth drift silently otherwise,
+          #    and the aera_config.mk mapping overwrites BoardConfig.mk with
+          #    the AERA_* value, so this one is what the compiler finally sees.
+          aera_list=$(grep -oE '^AERA_LOAD_VENDOR_MODULES[[:space:]]*:?=[[:space:]]*"[^"]*"' "$am" | sed 's/.*"\(.*\)"/\1/' | tr ' ' '\n' | sort | tr '\n' ' ')
+          bc_list=$(grep -oE '^TW_LOAD_VENDOR_MODULES[[:space:]]*:?=[[:space:]]*"[^"]*"' "$bc" | sed 's/.*"\(.*\)"/\1/' | tr ' ' '\n' | sort | tr '\n' ' ')
+          if [ -z "$aera_list" ]; then
+            echo "::error::aera_astonc.mk does not declare AERA_LOAD_VENDOR_MODULES; the public interface has been dropped"
+            fail=1
+          elif [ "$aera_list" != "$bc_list" ]; then
+            echo "::error::AERA_LOAD_VENDOR_MODULES and TW_LOAD_VENDOR_MODULES disagree"
+            echo "::error::  aera_astonc.mk : $aera_list"
+            echo "::error::  BoardConfig.mk : $bc_list"
+            fail=1
+          fi
+
+          # 10. The VINTF fix is what makes recovery decrypt, and it is
+          #     invisible until a device boots with an encrypted /data:
+          #     keystore2 aborts, the image still flashes and still boots.
+          #     Assert the wiring here instead of discovering it after a
+          #     flash. This is the check whose absence cost the most.
           if ! grep -q 'fix-recovery-vintf\.py' "$bc"; then
             echo "::error::BoardConfig.mk no longer runs scripts/fix-recovery-vintf.py; recovery will not decrypt"
             fail=1
@@ -503,20 +608,20 @@ jobs:
             fail=1
           fi
 
-          # 5. Root Manager is opt-in upstream and this device has to opt in.
+          # 11. Root Manager is opt-in upstream and this device has to opt in.
           #
-          #    Upstream 2782981 replaced AERA_ENABLE_KERNELSU_SUPPORT,
-          #    AERA_ENABLE_KERNELSU_NEXT_SUPPORT and AERA_ENABLE_SUKISU_SUPPORT
-          #    with the single AERA_ENABLE_ROOT_MANAGER and defaulted it to 0 in
-          #    aera_config.mk:7. The three old names are read nowhere now, so a
-          #    device tree that still exports only those builds a recovery whose
-          #    Menu silently omits the Root Manager row
-          #    (tool_scene.cpp: `if (item.action == Action::kRootManager &&
-          #    !root::Enabled()) continue;`) and whose ramdisk omits
-          #    system/etc/aera/root-providers entirely.
+          #     Upstream 2782981 replaced AERA_ENABLE_KERNELSU_SUPPORT,
+          #     AERA_ENABLE_KERNELSU_NEXT_SUPPORT and AERA_ENABLE_SUKISU_SUPPORT
+          #     with the single AERA_ENABLE_ROOT_MANAGER and defaulted it to 0 in
+          #     aera_config.mk:7. The three old names are read nowhere now, so a
+          #     device tree that still exports only those builds a recovery whose
+          #     Menu silently omits the Root Manager row
+          #     (tool_scene.cpp: `if (item.action == Action::kRootManager &&
+          #     !root::Enabled()) continue;`) and whose ramdisk omits
+          #     system/etc/aera/root-providers entirely.
           #
-          #    That failure is invisible in every other check: the image builds,
-          #    flashes and boots, and the only symptom is a missing row.
+          #     That failure is invisible in every other check: the image builds,
+          #     flashes and boots, and the only symptom is a missing row.
           if ! grep -qE '^[[:space:]]*AERA_ENABLE_ROOT_MANAGER[[:space:]]*:?=[[:space:]]*1[[:space:]]*$' "$am"; then
             echo "::error::aera_astonc.mk does not set AERA_ENABLE_ROOT_MANAGER := 1; the Menu will omit Root Manager"
             grep -nE '^[[:space:]]*AERA_ENABLE_ROOT_MANAGER' "$am" || echo "  (no assignment at all)"
@@ -540,17 +645,16 @@ jobs:
             fail=1
           fi
 
-          # 6. Report what is left, so the values are in the log even on success.
-          #    The pattern is anchored on the assignment so the two EXCLUDE_GKI
-          #    switches are listed separately and not as if they were Wi-Fi.
-          echo "--- Wi-Fi switches (want none) ---"
-          grep -nE '^[[:space:]]*(TW_LOAD_VENDOR_MODULES|OF_ENABLE_WLAN)[[:space:]]*:?=' "$bc" \
-            || echo "  (none)"
-          grep -nE '^[[:space:]]*(AERA_LOAD_VENDOR_MODULES|AERA_ENABLE_WLAN)[[:space:]]*:?=' "$am" \
-            || echo "  (none)"
-          echo "--- inert module-path switch (allowed either way) ---"
-          grep -nE '^[[:space:]]*(AERA_|TW_)LOAD_VENDOR_MODULES_EXCLUDE_GKI[[:space:]]*:?=' "$bc" "$am" \
-            || echo "  (none)"
+          # 12. Report what is configured, so the values are in the log even
+          #     on success. The pattern is anchored on the assignment so the
+          #     documented non-settings (the vendor_boot/prebuilt/post-decrypt
+          #     passes, mobile data) are not mistaken for the Wi-Fi switches.
+          echo "--- Wi-Fi switches (want all present) ---"
+          grep -nE '^[[:space:]]*(TW_LOAD_VENDOR_MODULES|TW_LOAD_VENDOR_MODULES_EXCLUDE_GKI|OF_ENABLE_WLAN)[[:space:]]*:?=' "$bc" || echo "  (none in BoardConfig.mk)"
+          grep -nE '^[[:space:]]*(AERA_LOAD_VENDOR_MODULES|AERA_LOAD_VENDOR_MODULES_EXCLUDE_GKI|AERA_ENABLE_WLAN)[[:space:]]*:?=' "$am" || echo "  (none in aera_astonc.mk)"
+          echo "--- module list agreement ---"
+          printf '  aera: %s\n' "$aera_list"
+          printf '  board: %s\n' "$bc_list"
           echo "--- vintf preparation hook ---"
           grep -n 'fix-recovery-vintf\.py' "$bc" || true
           echo "--- root manager switch (want AERA_ENABLE_ROOT_MANAGER := 1) ---"
@@ -563,10 +667,10 @@ jobs:
           ls -l "$dt/scripts/restore-menu-language.py" || true
 
           if [ "$fail" -ne 0 ]; then
-            echo "::error::the build configuration is wrong (Wi-Fi removal, VINTF fix or Root Manager); refusing to start a multi-hour build"
+            echo "::error::the build configuration is wrong (kernel modules, Wi-Fi, VINTF fix or Root Manager); refusing to start a multi-hour build"
             exit 1
           fi
-          echo "Wi-Fi removal OK; VINTF fix wired; Root Manager enabled"
+          echo "kernel module + Wi-Fi configuration OK; VINTF fix wired; Root Manager enabled"
 
       - name: Apply upstream source fixes
         run: |
@@ -585,53 +689,13 @@ jobs:
             echo "$f already includes android_filesystem_config.h"
           fi
 
-          # aera_build.mk lives in AERA-Recovery/android_bootable_recovery, a
-          # different repository this project cannot push to, so the change is
-          # applied here at build time.
-          #
-          # Upstream hangs NAS's two modules off the Wi-Fi block:
-          #     TWRP_REQUIRED_MODULES += wpa_supplicant ... dhcptool \
-          #         rclone_prebuilt \
-          #         fusermount3
-          # rclone_prebuilt compiles rclone (a full Go program) and
-          # fusermount3 compiles libfuse. Neither is a Wi-Fi dependency; the
-          # only consumers are NasManager.cpp and smb_browser.cpp, and both
-          # reach the binaries through runtime path strings ("/system/bin/
-          # rclone") and report "is missing" instead of failing to link. They
-          # are the last few GB on a volume that had already filled up (run
-          # 38100739430 died with "No space left on device" at ~1h03m, having
-          # compiled further than any other attempt).
-          #
-          # Both module names are unique in this file, so deleting the exact
-          # lines is safe and cannot hit an unrelated rule. `dhcptool` becomes
-          # the last item, which is why its trailing backslash goes away.
-          mk=bootable/recovery/aera_build.mk
-          if grep -q 'rclone_prebuilt' "$mk"; then
-            # Keep the copy outside the source tree: a stray aera_build.mk.orig
-            # sitting next to the real file is exactly the sort of thing a
-            # later `$(wildcard)` or packaging step could pick up.
-            cp "$mk" "${{ steps.vol.outputs.work }}/aera_build.mk.orig"
-            sed -i '/^[[:space:]]*rclone_prebuilt[[:space:]]*\\$/d' "$mk"
-            sed -i '/^[[:space:]]*fusermount3[[:space:]]*$/d' "$mk"
-            sed -i 's/^\([[:space:]]*dhcptool\)[[:space:]]*\\$/\1/' "$mk"
-            # Prove the edit landed and stopped the list cleanly. A silent
-            # no-op here would just reproduce the out-of-disk failure.
-            # Anchored on dhcptool rather than on "TWRP_REQUIRED_MODULES +="
-            # because that pattern appears several times in this file and the
-            # first match is an unrelated rule near the top.
-            echo "--- Wi-Fi module list after patch ---"
-            grep -n -B7 -A3 'dhcptool' "$mk" || true
-            if grep -q 'rclone_prebuilt\|fusermount3' "$mk"; then
-              echo "::error::rclone_prebuilt/fusermount3 still present after patch"
-              exit 1
-            fi
-            if ! grep -qE '^[[:space:]]*dhcptool[[:space:]]*$' "$mk"; then
-              echo "::error::dhcptool is not the last list item; the trailing backslash was not fixed"
-              exit 1
-            fi
-          else
-            echo "$mk does not carry rclone_prebuilt (upstream may have moved it)"
-          fi
+          # aera_build.mk note, 2026-10: the Wi-Fi block no longer carries
+          # rclone_prebuilt (upstream replaced the NAS backend with native
+          # SMB/SFTP via aera-netfs), and fusermount3 stayed because the native
+          # FUSE workers need it. The old build-time sed that deleted
+          # rclone_prebuilt/fusermount3 from this block is therefore gone; the
+          # Wi-Fi graph is correspondingly smaller than what run 38100739430
+          # measured, and nothing here trims upstream module lists any more.
 
           # Restore the Menu arrangement this device was verified against.
           #
@@ -700,7 +764,21 @@ jobs:
             echo "::error::the status bar does not poll every tick while the battery is unread"
             exit 1
           fi
-          echo "Battery read range-checked and polled while unread"
+          # v2: the diagnostics that report the gauge's behaviour from a
+          # flashed device. A build without them cannot be triaged from logs.
+          if ! grep -qF 'static int unreadable_polls = 0;' "$sb"; then
+            echo "::error::status_bar.cpp is missing the unreadable-poll counter; the battery diagnostics did not reach the compile"
+            exit 1
+          fi
+          if ! grep -qF '__android_log_print' "$sb"; then
+            echo "::error::status_bar.cpp does not log battery diagnostics to logcat"
+            exit 1
+          fi
+          if ! grep -qF '#include <android/log.h>' "$sb"; then
+            echo "::error::status_bar.cpp is missing <android/log.h>; the diagnostics would not compile"
+            exit 1
+          fi
+          echo "Battery read range-checked, polled while unread, and self-reporting"
 
           # Reboot: tw_reboot()'s rb_bootloader and rb_fastboot cases requested
           # the reboot without clearing the BCB first. init queues that request
@@ -728,7 +806,30 @@ jobs:
             echo "::error::the reboot requests themselves were lost while clearing the BCB"
             exit 1
           fi
-          echo "rb_bootloader and rb_fastboot clear the BCB before requesting the reboot"
+          # v2: the 15 s direct-reboot watchdog must be defined exactly once
+          # and armed from both fastboot-related cases, with the definition
+          # preceding its first call (C++ has no forward visibility without a
+          # header declaration).
+          if [ "$(grep -cF 'void Astonc_Reboot_Watchdog(const char *bcb_command) {' "$tr")" -ne 1 ]; then
+            echo "::error::the reboot watchdog function is not defined exactly once in twrp-functions.cpp"
+            exit 1
+          fi
+          if [ "$(grep -cF 'Astonc_Reboot_Watchdog("' "$tr")" -ne 2 ]; then
+            echo "::error::the reboot watchdog must be armed from exactly 2 call sites"
+            exit 1
+          fi
+          if ! grep -qF 'Astonc_Reboot_Watchdog("bootonce-bootloader");' "$tr" ||
+             ! grep -qF 'Astonc_Reboot_Watchdog("boot-fastboot");' "$tr"; then
+            echo "::error::the watchdog calls lost their BCB commands"
+            exit 1
+          fi
+          wd_def=$(grep -nF 'void Astonc_Reboot_Watchdog(const char *bcb_command) {' "$tr" | cut -d: -f1)
+          wd_call=$(grep -nF 'Astonc_Reboot_Watchdog("bootonce-bootloader");' "$tr" | cut -d: -f1)
+          if [ -z "$wd_def" ] || [ -z "$wd_call" ] || [ "$wd_def" -ge "$wd_call" ]; then
+            echo "::error::the watchdog definition must precede its first call (def=$wd_def call=$wd_call)"
+            exit 1
+          fi
+          echo "rb_bootloader and rb_fastboot clear the BCB, request the reboot, and arm the 15 s watchdog"
 
           # fastbootd: the device tree has to own the fastboot gadget bind,
           # because the shared upstream action never unbinds the UDC first and
@@ -950,41 +1051,38 @@ jobs:
           ls -l out/target/product/astonc/recovery.img 2>/dev/null | tee -a "$log" || true
           exit "$rc"
 
-      - name: Verify the recovery binary carries neither the module loader nor the Wi-Fi stack
+      - name: Verify the recovery binary carries the module loader and the Wi-Fi stack
         if: always()
         run: |
-          # Negative check, and the only one that observes the compiled result
-          # rather than the configuration. Configuration can be wrong in ways
-          # static checks miss: a later include overwriting a value, an ifdef
-          # elsewhere in the include chain, a variable that is set but never
-          # consumed. Reading the binary is what settles it.
+          # The strongest available check, and the one that would have caught
+          # the original defect on its own: read the produced binary and look
+          # for the loader's own string literals. Configuration can be wrong in
+          # ways static checks miss (a later include overwriting the value, an
+          # ifdef elsewhere in the chain), and a build that emits a plausible
+          # recovery.img while silently omitting the module loader is exactly
+          # the failure this project shipped once already.
           #
-          # Every string below was a REQUIRED presence in the Wi-Fi build. With
-          # Wi-Fi removed they must all be absent, so the check is inverted
-          # rather than deleted -- deleting it would quietly drop the only
-          # end-to-end assertion this workflow had.
-          #
-          # Why the specific failure mode matters: a recovery that still loads
-          # the QCA6490 stack during fstab parsing, but no longer has the
-          # sys.aera.wlan.up handler that used to complete cnss2's cold-boot
-          # calibration, hangs instead of degrading. That is indistinguishable
-          # from a broken decrypt at the device, which is exactly how a module
-          # list gets misattributed for days.
+          # The Wi-Fi removal era inverted this step to assert absence; the
+          # bring-up is back, so every string below is a REQUIRED presence
+          # again. A loader that is compiled in but left without the module
+          # list would fail the module-name checks; a compiled module list
+          # without the wlan backend would fail the sys.aera.wlan.up check.
           bin="${{ steps.vol.outputs.work }}/aera/out/target/product/astonc/system/bin/recovery"
           if [ ! -f "$bin" ]; then
             bin="${{ steps.vol.outputs.work }}/aera/out/target/product/astonc/recovery/root/system/bin/recovery"
           fi
           if [ ! -f "$bin" ]; then
-            echo "::error::recovery binary not found; cannot verify the module loader is compiled out"
+            echo "::error::recovery binary not found; cannot verify the module loader"
             ls -l "${{ steps.vol.outputs.work }}/aera/out/target/product/astonc/" 2>/dev/null || true
             exit 1
           fi
           echo "verifying $bin ($(stat -c%s "$bin") bytes)"
 
           # Control: prove the strings scan itself works before trusting any
-          # negative result. A binary that simply failed to link would make every
-          # `absent` check pass for the wrong reason. Measured on a real recovery
-          # binary: 46159 strings lines, "recovery" 167x.
+          # result. An earlier draft used `^recovery$` and a threshold of 10,
+          # which the known-good reference binary fails (it has exactly one
+          # such line). Measured on a real recovery binary: 46159 strings
+          # lines, "recovery" 167x, "vendor" 56x, "AERA" 301x.
           if [ "$(head -c4 "$bin" | od -An -tx1 | tr -d ' \n')" != "7f454c46" ]; then
             echo "::error::recovery is not an ELF file"
             exit 1
@@ -998,34 +1096,37 @@ jobs:
           fi
 
           fail=0
-          absent() {
+          check() {
             if strings -a "$bin" | grep -qF -- "$1"; then
-              echo "::error::still in the recovery binary: $1"
-              fail=1
+              echo "  found: $1"
             else
-              echo "  absent: $1"
+              echo "::error::missing from recovery binary: $1"
+              fail=1
             fi
           }
 
-          echo "--- recovery module loader (must be compiled out) ---"
-          absent "Attempting to load modules"
-          absent "Checking directory: "
-          absent "Modules Loaded: "
-          absent "modules.load.twrp"
-          absent "/vendor/lib/modules"
-          absent "/vendor_dlkm/lib/modules"
+          echo "--- recovery module loader ---"
+          check "Attempting to load modules"
+          check "Checking directory: "
+          check "Modules Loaded: "
+          check "modules.load.twrp"
+          check "/vendor/lib/modules"
+          check "/vendor_dlkm/lib/modules"
 
-          echo "--- QCA6490 / Wi-Fi stack (must not be requested) ---"
-          for m in cfg80211.ko mac80211.ko cnss2.ko cnss_plat_ipc_qmi_svc.ko qca_cld3_kiwi_v2.ko; do
-            absent "$m"
+          echo "--- requested module names ---"
+          for m in cfg80211.ko mac80211.ko cnss2.ko qca_cld3_kiwi_v2.ko cnss_plat_ipc_qmi_svc.ko; do
+            check "$m"
           done
-          absent "sys.aera.wlan.up"
+
+          echo "--- wlan.cpp / supplicant path ---"
+          check "wpa_supplicant"
+          check "sys.aera.wlan.up"
 
           if [ "$fail" -ne 0 ]; then
-            echo "::error::the recovery binary still contains the module loader or the Wi-Fi stack"
+            echo "::error::the recovery binary was built without the kernel module loader or the Wi-Fi stack; the resulting image cannot bring up wlan0"
             exit 1
           fi
-          echo "recovery binary carries neither the module loader nor the Wi-Fi stack"
+          echo "recovery binary contains the module loader and the Wi-Fi stack"
 
       - name: Verify the VINTF decrypt fix reached the ramdisk
         if: always()
@@ -1134,19 +1235,21 @@ jobs:
           fi
           echo "the ramdisk carries the VINTF decrypt fix"
 
-      - name: Verify the removed Wi-Fi ramdisk artifacts did not come back
+      - name: Verify the ramdisk stages the Wi-Fi binaries and the module hook
         if: always()
         run: |
-          # The source-tree check in the configuration step reads the device tree.
-          # This one reads the assembled ramdisk, which is a different artifact:
-          # AERA's own prebuilt etc/ install and BOARD_RECOVERY_IMAGE_PREPARE both
-          # write into recovery/root, and AERA's relink_binaries copies whatever
-          # RECOVERY_BINARY_SOURCE_FILES names by basename. Either could stage a
-          # file the device tree no longer has, and neither is visible in git.
+          # The source-tree check in the configuration step reads the device
+          # tree. This one reads the assembled ramdisk, which is a different
+          # artifact: AERA's own prebuilt etc/ install and
+          # BOARD_RECOVERY_IMAGE_PREPARE both write into recovery/root, and
+          # AERA's relink_binaries copies whatever RECOVERY_BINARY_SOURCE_FILES
+          # names by basename. A missing file here is a missing feature at the
+          # device, whatever the sources said.
           #
           # beforemodules.sh is the one that matters most: kernel_module_loader.cpp
-          # treats a missing hook as a no-op, so a hook that reappears means the
-          # module loader is on the build again.
+          # treats a missing hook as a no-op, so a hook that silently failed to
+          # stage would leave the QCA stack to libmodprobe's dependency-file
+          # resolution alone -- the exact failure mode the hook exists to avoid.
           root="${{ steps.vol.outputs.work }}/aera/out/target/product/astonc/recovery/root"
           if [ ! -d "$root" ]; then
             echo "recovery ramdisk tree not found at $root; skipping"
@@ -1155,33 +1258,53 @@ jobs:
           fail=0
 
           for f in system/bin/beforemodules.sh init.recovery.wifi.rc; do
-            if [ -e "$root/$f" ]; then
-              echo "::error::$f reached the recovery ramdisk although the device tree no longer carries it"
-              ls -l "$root/$f" || true
-              fail=1
+            if [ -f "$root/$f" ]; then
+              echo "  staged: $f ($(stat -c%s "$root/$f") bytes)"
             else
-              echo "  absent from the ramdisk: $f"
+              echo "::error::$f did not reach the recovery ramdisk"
+              fail=1
             fi
           done
 
-          # wpa_supplicant / wpa_cli / dhcptool are staged by aera_build.mk:885
-          # only when OF_ENABLE_WLAN == 1. Their presence means that gate is still
-          # firing, which is the failure a config-only check cannot see.
-          for b in system/bin/wpa_supplicant system/bin/wpa_cli system/bin/dhcptool; do
-            if [ -e "$root/$b" ]; then
-              echo "::error::$b was staged; OF_ENABLE_WLAN is still enabling the Wi-Fi targets"
+          # A CRLF shebang makes a script unrunnable on the device, and the
+          # failure is a bare "not found" that points nowhere near the cause.
+          for f in system/bin/beforemodules.sh init.recovery.wifi.rc; do
+            [ -f "$root/$f" ] || continue
+            if head -c2 "$root/$f" | grep -q $'\r' || grep -qU $'\r' "$root/$f"; then
+              echo "::error::$f contains CR characters; the shebang will not resolve on the device"
               fail=1
             fi
           done
+
+          # wpa_supplicant / wpa_cli / dhcptool are staged by aera_build.mk only
+          # when OF_ENABLE_WLAN == 1. Their absence means that gate never fired,
+          # which is the failure a config-only check cannot see.
+          for b in system/bin/wpa_supplicant system/bin/wpa_cli system/bin/dhcptool; do
+            if [ -e "$root/$b" ]; then
+              echo "  staged: $b ($(stat -c%s "$root/$b") bytes)"
+            else
+              echo "::error::$b is missing from the ramdisk; OF_ENABLE_WLAN did not reach the packaging"
+              fail=1
+            fi
+          done
+
+          # The supplicant VINTF manifest is staged by the Wi-Fi block's own
+          # rule; servicemanager needs it for the supplicant HAL registration.
+          if [ -e "$root/vendor/etc/vintf/manifest/android.hardware.wifi.supplicant.xml" ]; then
+            echo "  staged: vendor/etc/vintf/manifest/android.hardware.wifi.supplicant.xml"
+          else
+            echo "::error::the supplicant VINTF manifest did not reach the ramdisk"
+            fail=1
+          fi
 
           echo "--- what is in system/bin/ ---"
           ls "$root/system/bin/" 2>/dev/null || true
 
           if [ "$fail" -ne 0 ]; then
-            echo "::error::Wi-Fi artifacts reached the recovery ramdisk"
+            echo "::error::the Wi-Fi ramdisk artifacts are incomplete"
             exit 1
           fi
-          echo "no Wi-Fi artifacts in the recovery ramdisk"
+          echo "the ramdisk stages the module hook, the Wi-Fi init script and the supplicant binaries"
 
       - name: Verify the Menu revert, the Root Manager payload and the fastboot closure
         if: always()

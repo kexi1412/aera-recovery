@@ -34,26 +34,28 @@ MTP 构建进镜像：走 FunctionFS（`/dev/usb-ffs/mtp` + `sys.usb.config=mtp,
 "ADB & MTP disabled by maintainer" 并跳过 `Enable_MTP()`。**本树尚未在真机
 刷入验证 MTP**，刷入后需确认 `tw_mtp_enabled` 是否就绪。
 
-**WiFi 已于 `dc9122f` 整体移除，不要按 `wlan0` + `wpa_supplicant` 去找它。**
-移除原因与验证结论：
+**WiFi 已恢复（`5d614cd` + `39173c7` 的配置重新入树，并对照 2026-10-23 的
+`aera-16.0` 上游重新核对）。** 移除（`dc9122f`）时的归因早已被证伪：真实故障是
+keystore2 的 VINTF 声明失败，由 `cd60bd9` 修复且早于 Wi-Fi 改动。恢复时三项
+联动**必须一起动**——`TW_LOAD_VENDOR_MODULES` / `AERA_LOAD_VENDOR_MODULES`
+（loader 门禁，两份 9 模块列表逐字一致，CI 会比对）、`OF_ENABLE_WLAN` /
+`AERA_ENABLE_WLAN`（编译门禁，字面量 `1`）、`recovery/root` 下的
+`init.recovery.wifi.rc`（wpa_supplicant 服务 + `sys.aera.wlan.up` 处理器 +
+cnss2 fs_ready）与 `system/bin/beforemodules.sh`（loader 在解析模块目录前
+运行的确定性 insmod 挂钩，`kernel_module_loader.cpp:314` 仍调用它）。只开
+一半的表现是**卡死**而非功能缺失。CI 现在反向断言：配置门禁要求三处同时
+在场且一致，二进制检查要求 loader/Wi-Fi 字符串在编译产物中，ramdisk 检查
+要求 wpa_supplicant/wpa_cli/dhcptool/init.recovery.wifi.rc/beforemodules.sh
+全部入盘。
 
-- 原归因为"recovery 里加载 QCA6490 模块栈导致解密后进 9008"。
-  该归因**已被证伪**：取证镜像 `oplusreserve5.img` 的最晚日志时间为
-  2026-10-08 22:05:49，而 Wi-Fi 改动提交于 2026-10-11 08:24:05——
-  **样本早于改动 3 天**，且镜像内 `wpa_supplicant`/`insmod`/`Attempting to
-  load modules` 命中均为 0。
-- 镜像里真实的失败是 keystore2 的 VINTF 声明失败（`Found
-  android.system.keystore2` = 0，`received signal 6` ×88），
-  该缺陷由 `cd60bd9`（2026-10-10 19:57）修复，**比 Wi-Fi 改动还早**。
-- 本次移除的真实目的是**回到唯一经真机验证的配置 `95e0b23`（CI run #10，
-  用户实测可解密 `/data`）**。该配置同时不含 Wi-Fi 与 module loader。
-  移除后连带不再编译 `rclone_prebuilt` 与 `fusermount3`（上游把二者挂在
-  `OF_ENABLE_WLAN` 块内），磁盘占用随之下降。
-- 若将来要恢复 Wi-Fi，注意三者是**联动**的：`TW_LOAD_VENDOR_MODULES`
-  （loader 门禁）、`OF_ENABLE_WLAN`（编译门禁）、`recovery/root` 下的
-  hook 与 init rc 必须一起动。只开一半的表现是**卡死**而非功能缺失。
-  CI 的 `Verify Wi-Fi is fully removed from the build configuration` 步骤
-  会对重新引入的任一半配置直接失败。
+随 Wi-Fi 一并恢复的还有 persist 分区挂载（`recovery.fstab` 的
+`/mnt/vendor/persist` 条目 + `init.recovery.wifi.rc` 的 post-fs mount +
+`ueventd.rc` 的 firmware_directories 超集）：cnss2 按 `kiwi/%s` 相对名取
+固件、qca_cld3_kiwi_v2 取 `wlan/WCNSS_qcom_cfg.ini`，都依赖这条搜索路径。
+上游 `aera_build.mk` 的 Wi-Fi 块还会打包 `aera-netfs`（原生 SMB/SFTP）与
+`fusermount3`；`rclone_prebuilt` 已被上游移除，构建图比当年小得多。
+`AERA_ENABLE_MOBILE_DATA` 保持不设：上游蜂窝后端需要设备树提供 RIL/QMI
+provider，本树没有。
 
 ## 编译
 
