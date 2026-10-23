@@ -46,13 +46,100 @@ AERA_AB_DEVICE_WITH_RECOVERY_PARTITION := 1
 AERA_ENABLE_FRP_ADDON := 1
 AERA_USE_LZ4_COMPRESSION := 1
 
-# Keep firmware/module loading on the installed vendor_boot provider; the
-# matched ABI modules already live there (see config/kernel-modules.json).
+# The backend compares this against the literal string "true"
+# (Android.mk:377: ifeq ($(TW_LOAD_VENDOR_MODULES_EXCLUDE_GKI),true)), so the
+# value must be literally true; `1` would silently not match and leave the
+# switch inert. It is set anyway because with the module loader now enabled the
+# switch does take effect: leaving it unset adds /vendor/lib/modules/<maj>.<min>-gki
+# and /lib/modules/<maj>.<min>-gki to the search list, and neither exists here
+# (/vendor/lib/modules is a symlink to /vendor_dlkm/lib/modules, and the
+# recovery ramdisk has no /lib/modules). Only the vendor_boot and vendor_dlkm
+# copies of the stack matter.
+AERA_LOAD_VENDOR_MODULES_EXCLUDE_GKI := true
+
+# Wi-Fi: QCA6490 attached over PCIe, driven by the kiwi_v2 host driver.
 #
-# The Wi-Fi counterparts (AERA_LOAD_VENDOR_MODULES, AERA_ENABLE_WLAN) are not
-# set. They cannot be enabled independently of the recovery module loader, and
-# that loader is deliberately off in BoardConfig.mk - see the note there.
-AERA_LOAD_VENDOR_MODULES_EXCLUDE_GKI := 1
+# The module loader is MANDATORY for Wi-Fi. AERA_ENABLE_WLAN alone only compiles
+# wlan.cpp in; the driver stack still has to reach the kernel.
+#
+# Note the two ramdisks are different, which is easy to conflate (see the
+# EXCLUDE_GKI comment above, where the recovery ramdisk is the one with no
+# /lib/modules):
+#
+#   recovery.img ramdisk      no /lib/modules at all.
+#   vendor_boot ramdisk       mounted at /lib/modules and DOES carry a module
+#                             tree (config/kernel-modules.json lists 450 files),
+#                             but the only Wi-Fi entries in it are cfg80211.ko
+#                             and mac80211.ko (modules.load.recovery:405-406).
+#
+# So cfg80211/mac80211 may already be present, while the CNSS service layer, the
+# PCIe host driver and kiwi_v2 are NOT in that tree at all - they exist only in
+# /vendor_dlkm/lib/modules, which nothing mounts or loads unless the recovery
+# module loader does it. With the stack absent, wlan0 never appears and
+# Wlan::StartInitSupplicantService() times out on init.svc.wpa_supplicant.
+#
+# KernelModuleLoader::Load_Vendor_Modules() matches this list by EXACT filename
+# including the .ko suffix against the entries present in its module directories,
+# and libmodprobe then resolves dependencies itself from modules.dep with
+# strict=false, so the order below is not load order. All of these live in
+# /vendor_dlkm/lib/modules, which is where the loader looks once
+# /vendor/lib/modules yields nothing useful.
+#
+# qca_cld3_kiwi.ko is deliberately ABSENT: it refuses this silicon with "Driver
+# built for chip ver 0x1, enumerated ver 0x2, reject unsupported driver", while
+# qca_cld3_kiwi_v2.ko binds and owns cnss2 (live /proc/modules:
+# "cnss2 606208 1 kiwi_v2, Live").
+#
+# rmnet_wlan.ko is deliberately ABSENT: it fails with "Unknown symbol
+# rmnet_module_hook_register (err -2)" because rmnet_core.ko is not in this
+# module directory, and the rmnet data path is not needed for wlan0 to appear.
+#
+# The order reproduces this device's stock /vendor_dlkm/lib/modules/modules.load:
+# cfg80211:264, mac80211:265, qca_cld3_kiwi_v2:380, cnss2:382,
+# cnss_plat_ipc_qmi_svc:383, wlan_firmware_service:384, cnss_nl:385,
+# cnss_prealloc:386, cnss_utils:387. cfg80211/mac80211 first is what makes the
+# rest resolvable; the QCA stack then follows in vendor order. This ordering only
+# matters for manual insmod probing, where loading cnss2 before its QMI
+# dependencies fails with "Unknown symbol wlfw_*_ind_msg_v01_ei".
+#
+# The value is a make string and is passed to LOCAL_CFLAGS as
+# -DTW_LOAD_VENDOR_MODULES=<value>. Keep the quotes so the whole list stays one
+# compiler argument: kernel_module_loader.cpp recovers it with
+# EXPAND()/STRINGIFY, and an unquoted list would make the compiler see the words
+# after the first as separate arguments.
+# This is the public AERA_* interface value. It is NOT what gates the build.
+#
+# The build is gated by TW_LOAD_VENDOR_MODULES, which bootable/recovery/
+# Android.mk:369 tests as
+#     ifneq ($(strip $(TW_LOAD_VENDOR_MODULES) $(TW_POST_DECRYPT_MODULES)),)
+# to decide whether kernel_module_loader.cpp is compiled at all. BoardConfig.mk
+# sets that internal name with the identical list; the aera_config.mk mapping
+# runs after BoardConfig.mk and overwrites it, which is harmless exactly as long
+# as the two stay in sync - the CI gate compares them.
+#
+# What actually makes the modules load is recovery/root/system/bin/
+# beforemodules.sh, which kernel_module_loader.cpp:314 runs before it resolves
+# any module directory (still present in the aera-16.0 upstream of 2026-10-23,
+# which now loads the staged modules with finit_module). See that file for why
+# libmodprobe alone is not enough.
+AERA_LOAD_VENDOR_MODULES := "cfg80211.ko mac80211.ko cnss_prealloc.ko cnss_utils.ko cnss_plat_ipc_qmi_svc.ko wlan_firmware_service.ko cnss_nl.ko cnss2.ko qca_cld3_kiwi_v2.ko"
+
+# Wi-Fi UI and backend. wlan.cpp / aera_wifi_dispatcher.cpp /
+# aera_supplicant_link.cpp / aera_adbd.cpp / the Network scenes and
+# nas/NasManager.cpp are only compiled when OF_ENABLE_WLAN == 1, and
+# aera_build.mk:876 tests `ifeq ($(OF_ENABLE_WLAN),1)`, so the value must be
+# literally 1 - not true. BoardConfig.mk sets OF_ENABLE_WLAN for that reason,
+# using the same mapping this line feeds; it is kept here as the public
+# interface value.
+#
+# Enabling this also makes aera_build.mk require external/wpa_supplicant_8 (it
+# hard-errors if absent; the AERA manifest provides it) and adds
+# wpa_supplicant, wpa_cli, dhcptool, aera-netfs, the supplicant VINTF manifest
+# and the wifi keystore/keymint/common NDK libraries to the recovery image.
+#
+# AERA_ENABLE_MOBILE_DATA is deliberately NOT set: the cellular provider needs
+# a device-side RIL/QMI implementation this tree does not ship.
+AERA_ENABLE_WLAN := 1
 
 # Root Manager, the offline KernelSU / KernelSU-Next / SukiSU-Ultra providers.
 #

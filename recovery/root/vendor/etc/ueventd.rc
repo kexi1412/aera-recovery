@@ -1,5 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
-firmware_directories /etc/firmware/ /odm/firmware/ /vendor/firmware/ /vendor/firmware_mnt/image/ /firmware/image/
+
+# Firmware search path for the kernel's firmware_class loader. This list is the
+# only thing that makes relative firmware names resolvable: cnss2 requests
+# "kiwi/amss.bin", "kiwi/bdwlan.elf" and "bdwlan%02x.e%02x", and
+# qca_cld3_kiwi_v2 requests "wlan/WCNSS_qcom_cfg.ini". The entries below are the
+# vendor's own list from /vendor/etc/ueventd.rc, restricted to the sources that
+# exist in recovery:
+#   /vendor/firmware_mnt/image/  kiwi/{amss.bin,amss20.bin,bdwlan.elf,bdwlan.e*,
+#                                regdb.bin} -> the "kiwi/%s" requests
+#   /odm/etc/wifi/               bdwlan.elf, regdb.bin -> BDF fallback
+#   /mnt/vendor/persist/         wlan/WCNSS_qcom_cfg.ini -> the ini requests
+#                                (no other listed directory has a top-level
+#                                 wlan/WCNSS_qcom_cfg.ini; /vendor/firmware/wlan
+#                                 only holds qca_cld/<chip>/ copies)
+#   /mnt/vendor/persist/copy/    per-chip BDF overrides
+# The /etc/firmware, /odm/firmware, /vendor/firmware and /firmware/image entries
+# are kept because the vendor list carries them and some blobs fall back there.
+firmware_directories /mnt/vendor/persist/copy/ /odm/etc/wifi/ /mnt/vendor/persist/ /vendor/firmware_mnt/image/ /etc/firmware/ /odm/firmware/ /vendor/firmware/ /firmware/image/
+
 /dev/dri/* 0660 root graphics
 /dev/graphics/* 0660 root graphics
 /dev/input/* 0660 root input

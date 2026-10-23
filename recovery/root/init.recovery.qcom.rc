@@ -28,6 +28,12 @@
 # PJE110 hardware bring-up; security services are in astonc.security.rc.
 # /system/etc/init/*.rc is already parsed by init; do not import it again.
 
+# Wi-Fi bring-up. Lives in its own file because it defines the wpa_supplicant
+# service plus the sys.aera.wlan.up handler that wlan.cpp pokes. Imported from
+# here rather than from init.recovery.usb.rc so that USB/MTP and WLAN stay
+# independently reviewable and either can be reverted on its own.
+import /init.recovery.wifi.rc
+
 on early-init
     # SetupCgroups runs before early-init. AOSP SCHED_SP_BACKGROUND joins these
     # groups; create them before logd starts in the init action.

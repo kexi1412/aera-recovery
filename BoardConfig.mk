@@ -194,25 +194,89 @@ AERA_RECOVERY_ADDITIONAL_RELINK_LIBRARY_FILES += \
 BOARD_VENDOR_SEPOLICY_DIRS += $(DEVICE_PATH)/sepolicy
 
 # ---------------------------------------------------------------------------
-# Kernel module loading: intentionally NOT configured.
+# Kernel module loading (Wi-Fi / QCA6490)
 # ---------------------------------------------------------------------------
-# TW_LOAD_VENDOR_MODULES and OF_ENABLE_WLAN were removed together with the
-# QCA6490 Wi-Fi bring-up. With TW_LOAD_VENDOR_MODULES unset,
-# bootable/recovery/Android.mk:362 compiles kernel_module_loader.cpp out
-# entirely; without OF_ENABLE_WLAN, aera_build.mk:885 does not stage
-# wpa_supplicant/wpa_cli/dhcptool. Modules are left to the installed vendor_boot
-# provider. This is the configuration that was verified on hardware: recovery
-# boot, PIN decrypt, then a normal reboot.
+# These are set HERE as well as in aera_astonc.mk. The aera_config.mk mapping
+# from the public AERA_* namespace does fire, but it is an immediate assignment
+# that runs LAST (aera_astonc.mk is evaluated during product import, then
+# BoardConfig.mk, then aera_config.mk at config.mk:478-479), so it OVERWRITES
+# whatever this file sets. That is harmless only while the two agree, which is
+# why aera_astonc.mk carries the identical 9-module list and why the CI gate
+# compares the two.
 #
-# TW_LOAD_VENDOR_MODULES_EXCLUDE_GKI is deliberately not set here either. It is
-# not a Wi-Fi switch and it is inert without the loader: it only trims
-# /vendor/lib/modules/<maj>.<min>-gki and /lib/modules/<maj>.<min>-gki from the
-# loader's search list. The AERA_* public form of it is still declared in
-# aera_astonc.mk, exactly as in the verified configuration, so nothing about the
-# module search path is being changed by this file.
+# This file is still the right place to set them, for two independent reasons:
+#   * Every Android.mk is parsed after config.mk has finished, so these values
+#     are unconditionally in scope for the loader gate at
+#     bootable/recovery/Android.mk:369
+#       ifneq ($(strip $(TW_LOAD_VENDOR_MODULES) $(TW_POST_DECRYPT_MODULES)),)
+#     and for the Wi-Fi gate at Android.mk:75 - immune to any future change in
+#     the ordering above.
+#   * The reference tree for this platform does the same thing -
+#     twrp_device_oplus_sm8550 BoardConfig.mk:237-238 sets
+#     TW_LOAD_VENDOR_MODULES and TW_LOAD_VENDOR_MODULES_EXCLUDE_GKI in
+#     BoardConfig.mk, with the same double quoting - so this is the established
+#     shape for the platform rather than a local invention.
 #
-# Do not re-add a partial set. The three real switches are coupled - the loader
-# gate, the Wi-Fi compile gate and the ramdisk hook have to move together - and a
-# recovery that loads modules but cannot start a supplicant presents as a hang
-# rather than as a missing feature. That failure is indistinguishable from a
-# broken decrypt at the device, which is how a module list gets misattributed.
+# BoardConfig.mk does not need to be careful about a readonly clash here:
+# board_config.mk:22-33 _board_strip_readonly_list lists only BOARD_* names, so
+# TW_LOAD_VENDOR_MODULES is not readonly and assigning it is legal.
+#
+# The quotes matter and must be kept: LOCAL_CFLAGS carries
+# -DTW_LOAD_VENDOR_MODULES="cfg80211.ko ..." as a single shell word, the
+# preprocessor defines it as a token sequence, and
+# twcommon.h:38 STRINGIFY(...) `#__VA_ARGS__` then stringifies the whole
+# sequence into one literal that TWFunc::split_string splits on spaces.
+# Without the quotes only the first module would survive.
+#
+# Module set: the QCA6490 (kiwi_v2) stack, ordered so that dependencies are
+# resolvable. cfg80211 and mac80211 first, then the CNSS service layer, then the
+# PCIe host driver and finally the chip driver. Re-verified against the
+# aera-16.0 upstream of 2026-10-23: Android.mk:369 still gates the loader on
+# TW_LOAD_VENDOR_MODULES, Android.mk:378 still tests EXCLUDE_GKI against the
+# literal "true", kernel_module_loader.cpp:314 still runs
+# /system/bin/beforemodules.sh, and aera_build.mk:876 still stages the
+# supplicant under OF_ENABLE_WLAN==1.
+TW_LOAD_VENDOR_MODULES := "cfg80211.ko mac80211.ko cnss_prealloc.ko cnss_utils.ko cnss_plat_ipc_qmi_svc.ko wlan_firmware_service.ko cnss_nl.ko cnss2.ko qca_cld3_kiwi_v2.ko"
+
+# Must be the literal string true, not 1: Android.mk:377 tests it with
+# ifeq ($(TW_LOAD_VENDOR_MODULES_EXCLUDE_GKI),true). It drops the
+# /lib/modules/<major>.<minor>-gki directory from the search list, because the
+# GKI modules for that path are the stock kernel's and must not shadow the
+# vendor copies that match this device's kernel.
+TW_LOAD_VENDOR_MODULES_EXCLUDE_GKI := true
+
+# Wi-Fi backend and UI. Must be the literal 1, not true: Android.mk:75 and
+# aera_build.mk:876 both compare it with ifeq against 1. With it set, wlan.cpp,
+# aera_wifi_dispatcher.cpp, aera_supplicant_link.cpp, the Network scenes and
+# aera_adbd.cpp are compiled, and wpa_supplicant, wpa_cli, dhcptool,
+# aera-netfs, the supplicant VINTF manifest and the wifi keystore/keymint NDK
+# libraries are staged into the ramdisk, which is what
+# init.recovery.wifi.rc:159 runs as a service. aera_build.mk also hard-errors
+# when external/wpa_supplicant_8 is absent; the AERA manifest provides it
+# (default.xml), as it provides external/libfuse for fusermount3.
+#
+# Note upstream no longer builds rclone in this block: the native SMB/SFTP
+# storage replaced it (aera-netfs), so the Wi-Fi graph is far smaller than the
+# one run 38100739430 measured.
+OF_ENABLE_WLAN := 1
+
+# Deliberately NOT set:
+#   TW_LOAD_VENDOR_BOOT_MODULES - compiles in the /lib/modules pass at
+#     kernel_module_loader.cpp:317. /lib/modules is the vendor_boot platform
+#     ramdisk and, per config/kernel-modules.json, holds 450 modules totalling
+#     67,991,336 B of which only cfg80211.ko and mac80211.ko are on the list
+#     above. Try_And_Load_Modules() copies the whole directory into /tmp
+#     (Copy_Modules_To_Tmpfs does not consult the requested list) and /tmp is
+#     tmpfs, so the pass would spend ~65 MiB of RAM to load two modules that
+#     recovery/root/system/bin/beforemodules.sh already insmods from the same
+#     directory at no copy cost.
+#   TW_LOAD_PREBUILT_MODULES_AT_FIRST - vendor_prebuilt modules are not shipped
+#     in this ramdisk; BOARD_RECOVERYIMAGE_PARTITION_SIZE is a 100 MiB cap and
+#     the .ko set is deliberately left out of it.
+#   TW_POST_DECRYPT_MODULES - the /system_dlkm and post-decrypt staging path is
+#     for FBE keys and this device stages nothing there. Setting it would also
+#     make Android.mk emit -DTW_POST_DECRYPT_MODULES, and
+#     Stage_Post_Decrypt_Modules() has no work to do.
+#   AERA_ENABLE_MOBILE_DATA - the upstream cellular provider is opt-in and
+#     needs a device-side RIL/QMI implementation that this tree does not ship;
+#     enabling the flag would only surface a "no provider" row.
