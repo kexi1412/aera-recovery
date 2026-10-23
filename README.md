@@ -34,28 +34,30 @@ MTP 构建进镜像：走 FunctionFS（`/dev/usb-ffs/mtp` + `sys.usb.config=mtp,
 "ADB & MTP disabled by maintainer" 并跳过 `Enable_MTP()`。**本树尚未在真机
 刷入验证 MTP**，刷入后需确认 `tw_mtp_enabled` 是否就绪。
 
-**WiFi 已恢复（`5d614cd` + `39173c7` 的配置重新入树，并对照 2026-10-23 的
-`aera-16.0` 上游重新核对）。** 移除（`dc9122f`）时的归因早已被证伪：真实故障是
-keystore2 的 VINTF 声明失败，由 `cd60bd9` 修复且早于 Wi-Fi 改动。恢复时三项
-联动**必须一起动**——`TW_LOAD_VENDOR_MODULES` / `AERA_LOAD_VENDOR_MODULES`
-（loader 门禁，两份 9 模块列表逐字一致，CI 会比对）、`OF_ENABLE_WLAN` /
-`AERA_ENABLE_WLAN`（编译门禁，字面量 `1`）、`recovery/root` 下的
-`init.recovery.wifi.rc`（wpa_supplicant 服务 + `sys.aera.wlan.up` 处理器 +
-cnss2 fs_ready）与 `system/bin/beforemodules.sh`（loader 在解析模块目录前
-运行的确定性 insmod 挂钩，`kernel_module_loader.cpp:314` 仍调用它）。只开
-一半的表现是**卡死**而非功能缺失。CI 现在反向断言：配置门禁要求三处同时
-在场且一致，二进制检查要求 loader/Wi-Fi 字符串在编译产物中，ramdisk 检查
-要求 wpa_supplicant/wpa_cli/dhcptool/init.recovery.wifi.rc/beforemodules.sh
-全部入盘。
+**WiFi 已恢复，且模块在解密之后加载（post-decrypt）。** `dc9122f` 移除时的
+归因方向正确但对象错误：run #34（2026-10-24）实测证明，fstab 解析期加载
+QCA6490 栈会**同时破坏解密与 WiFi**——`Load_Vendor_Modules()` 结束时卸载
+/vendor 与 /vendor_dlkm，keymint 惰性加载 vendor 库失败（解密死）、cnss2
+无法解析 amss.bin（wlan0 永不出现）。因此本树的形态是：
 
-随 Wi-Fi 一并恢复的还有 persist 分区挂载（`recovery.fstab` 的
-`/mnt/vendor/persist` 条目 + `init.recovery.wifi.rc` 的 post-fs mount +
-`ueventd.rc` 的 firmware_directories 超集）：cnss2 按 `kiwi/%s` 相对名取
-固件、qca_cld3_kiwi_v2 取 `wlan/WCNSS_qcom_cfg.ini`，都依赖这条搜索路径。
-上游 `aera_build.mk` 的 Wi-Fi 块还会打包 `aera-netfs`（原生 SMB/SFTP）与
-`fusermount3`；`rclone_prebuilt` 已被上游移除，构建图比当年小得多。
-`AERA_ENABLE_MOBILE_DATA` 保持不设：上游蜂窝后端需要设备树提供 RIL/QMI
-provider，本树没有。
+- `TW_LOAD_VENDOR_MODULES` **不设**：解密前的启动路径与已验证的 #33
+  逐字节一致；
+- `TW_POST_DECRYPT_MODULES`（BoardConfig.mk）与
+  `AERA_POST_DECRYPT_MODULES`（aera_astonc.mk，经 aera_config.mk:125 映射）
+  携带同一 9 模块列表，`Load_Post_Decrypt_Modules()` 在 Decrypt_Data()
+  成功后用 `finit_module` 按依赖序加载；`scripts/fix-post-decrypt-stage.py`
+  给它加按需 staging 并先挂载 /vendor、/vendor_dlkm、persist（固件与
+  校准的来源）；
+- `OF_ENABLE_WLAN` / `AERA_ENABLE_WLAN := 1`（字面量 1）照旧编译 WiFi
+  栈与 UI、staging wpa_supplicant/wpa_cli/dhcptool/aera-netfs；
+- `init.recovery.wifi.rc`（wpa_supplicant 服务 + `sys.aera.wlan.up` 处理器
+  + cnss2 fs_ready）、persist 挂载（fstab + post-fs + ueventd
+  firmware_directories 超集）与 `beforemodules.sh`（记录装载顺序，
+  post-decrypt 路径不调用）全部入树，CI 逐一断言。
+
+只开一半的表现仍是**卡死**而非功能缺失。上游 `aera_build.mk` 的 Wi-Fi 块
+打包 `aera-netfs`（原生 SMB/SFTP）与 `fusermount3`；`rclone_prebuilt` 已被
+上游移除。`AERA_ENABLE_MOBILE_DATA` 保持不设（树上无 RIL/QMI provider）。
 
 ## 编译
 

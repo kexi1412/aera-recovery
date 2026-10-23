@@ -467,55 +467,60 @@ jobs:
           am="$dt/aera_astonc.mk"
           fail=0
 
-          # 1. The gate variable itself. Android.mk:369 is
-          #    `ifneq ($(strip $(TW_LOAD_VENDOR_MODULES) $(TW_POST_DECRYPT_MODULES)),)`.
-          if ! grep -qE '^[[:space:]]*TW_LOAD_VENDOR_MODULES[[:space:]]*:?=' "$bc"; then
-            echo "::error::BoardConfig.mk does not set TW_LOAD_VENDOR_MODULES; kernel_module_loader.cpp will be compiled out and Wi-Fi cannot work"
+          # 1. The pre-decrypt loader gate must be GONE, and the post-decrypt
+          #    list present. Run #34 proved the fstab-parse-time loader breaks
+          #    decrypt on this device (Load_Vendor_Modules unmounts /vendor and
+          #    /vendor_dlkm when it finishes, which kills keymint's lazy
+          #    vendor-library loads and cnss2's firmware resolution), so
+          #    partitionmanager.cpp:764 must compile its call out and the
+          #    modules must load from the Decrypt_Data() success path instead
+          #    (partitionmanager.cpp:2665, under TW_POST_DECRYPT_MODULES).
+          if grep -qE '^[[:space:]]*TW_LOAD_VENDOR_MODULES[[:space:]]*:?=' "$bc"; then
+            echo "::error::BoardConfig.mk still sets TW_LOAD_VENDOR_MODULES; the fstab-parse loader breaks decrypt on this device (run #34 evidence)"
+            fail=1
+          fi
+          if ! grep -qE '^[[:space:]]*TW_POST_DECRYPT_MODULES[[:space:]]*:?=' "$bc"; then
+            echo "::error::BoardConfig.mk does not set TW_POST_DECRYPT_MODULES; the Wi-Fi modules would never load"
             fail=1
           fi
 
           # 2. Quotes. The value is passed through -D and then stringified by
           #    twcommon.h EXPAND/STRINGIFY, which needs one token sequence.
           #    Unquoted, only the first module survives.
-          if ! grep -qE '^[[:space:]]*TW_LOAD_VENDOR_MODULES[[:space:]]*:?=[[:space:]]*"' "$bc"; then
-            echo "::error::TW_LOAD_VENDOR_MODULES is not quoted; only the first module would be loaded"
+          if ! grep -qE '^[[:space:]]*TW_POST_DECRYPT_MODULES[[:space:]]*:?=[[:space:]]*"' "$bc"; then
+            echo "::error::TW_POST_DECRYPT_MODULES is not quoted; only the first module would be loaded"
             fail=1
           fi
 
-          # 3. Modules that carry the QCA6490 stack. cfg80211 and mac80211 are
-          #    the symbols everything else resolves against; cnss2 owns the PCIe
-          #    endpoint and qca_cld3_kiwi_v2 is the only chip driver that binds
-          #    this silicon (the non-_v2 kiwi refuses it).
-          #
-          #    Tested against the extracted value of the assignment, not against
-          #    the whole file. The surrounding commentary names cfg80211.ko and
-          #    mac80211.ko in prose, so grepping the file would keep passing
-          #    after both had been dropped from the list.
-          bc_mods=$(grep -oE '^TW_LOAD_VENDOR_MODULES[[:space:]]*:?=[[:space:]]*"[^"]*"' "$bc" | sed 's/.*"\(.*\)"/\1/')
+          # 3. Modules that carry the QCA6490 stack, and their ORDER: with
+          #    finit_module there is no modules.dep resolution, so dependency
+          #    order IS load order -- cfg80211 before mac80211 before cnss2
+          #    before kiwi_v2.
+          bc_mods=$(grep -oE '^TW_POST_DECRYPT_MODULES[[:space:]]*:?=[[:space:]]*"[^"]*"' "$bc" | sed 's/.*"\(.*\)"/\1/')
           for m in cfg80211.ko mac80211.ko cnss2.ko qca_cld3_kiwi_v2.ko; do
             if ! printf '%s\n' "$bc_mods" | tr ' ' '\n' | grep -qxF "$m"; then
-              echo "::error::TW_LOAD_VENDOR_MODULES does not list $m"
+              echo "::error::TW_POST_DECRYPT_MODULES does not list $m"
               fail=1
             fi
           done
-
-          # 4. The GKI exclusion must be the literal `true` (Android.mk:377),
-          #    in both files: with the loader now compiled in, this switch is
-          #    live, and `1` would silently fail the ifeq and leave the stock
-          #    GKI module directories on the search path.
-          if ! grep -qE '^[[:space:]]*TW_LOAD_VENDOR_MODULES_EXCLUDE_GKI[[:space:]]*:?=[[:space:]]*true[[:space:]]*$' "$bc"; then
-            echo "::error::TW_LOAD_VENDOR_MODULES_EXCLUDE_GKI must be exactly 'true'"
-            fail=1
-          fi
-          if ! grep -qE '^[[:space:]]*AERA_LOAD_VENDOR_MODULES_EXCLUDE_GKI[[:space:]]*:?=[[:space:]]*true[[:space:]]*$' "$am"; then
-            echo "::error::AERA_LOAD_VENDOR_MODULES_EXCLUDE_GKI must be exactly 'true' (1 does not match Android.mk's ifeq)"
+          pos() { printf '%s\n' "$bc_mods" | tr ' ' '\n' | grep -nx "$1" | cut -d: -f1; }
+          p_cfg=$(pos cfg80211.ko); p_mac=$(pos mac80211.ko)
+          p_cnss=$(pos cnss2.ko); p_kiwi=$(pos qca_cld3_kiwi_v2.ko)
+          if [ -z "$p_cfg" ] || [ -z "$p_mac" ] || [ -z "$p_cnss" ] || [ -z "$p_kiwi" ] \
+             || [ "$p_cfg" -ge "$p_mac" ] || [ "$p_mac" -ge "$p_cnss" ] || [ "$p_cnss" -ge "$p_kiwi" ]; then
+            echo "::error::TW_POST_DECRYPT_MODULES is out of dependency order; finit_module needs cfg80211 < mac80211 < cnss2 < qca_cld3_kiwi_v2"
             fail=1
           fi
 
-          # 5. The loader hook has to exist in the ramdisk, because the load
-          #    order it enforces is what makes the stack resolve.
+          # 4. The loader hook still ships (it documents the stock load order
+          #    and keeps the pre-decrypt path one commit away), and the
+          #    post-decrypt staging patch must be wired.
           if [ ! -f "$dt/recovery/root/system/bin/beforemodules.sh" ]; then
             echo "::error::recovery/root/system/bin/beforemodules.sh is missing"
+            fail=1
+          fi
+          if [ ! -f "$dt/scripts/fix-post-decrypt-stage.py" ]; then
+            echo "::error::scripts/fix-post-decrypt-stage.py is missing; Load_Post_Decrypt_Modules would stage nothing and load no modules"
             fail=1
           fi
 
@@ -556,13 +561,21 @@ jobs:
             fail=1
           fi
 
-          # 8. Upstream must still contain the hook, the gates and the
-          #    wlan.cpp contract this configuration relies on. If AERA renames
-          #    them, the configuration has to be re-derived rather than
-          #    silently doing nothing.
+          # 8. Upstream must still contain the post-decrypt path, the hook and
+          #    the wlan.cpp contract this configuration relies on. If AERA
+          #    renames them, the configuration has to be re-derived rather
+          #    than silently doing nothing.
           bb="${{ steps.vol.outputs.work }}/aera"
           if ! grep -q 'beforemodules.sh' "$bb/bootable/recovery/kernel_module_loader.cpp"; then
-            echo "::error::kernel_module_loader.cpp no longer calls /system/bin/beforemodules.sh; the ramdisk hook is dead code"
+            echo "::error::kernel_module_loader.cpp no longer calls /system/bin/beforemodules.sh; the ramdisk hook contract moved"
+            fail=1
+          fi
+          if ! grep -q 'KernelModuleLoader::Load_Post_Decrypt_Modules();' "$bb/bootable/recovery/partitionmanager.cpp"; then
+            echo "::error::partitionmanager.cpp no longer calls Load_Post_Decrypt_Modules; the post-decrypt load would never run"
+            fail=1
+          fi
+          if ! grep -q 'Stage_Post_Decrypt_Modules' "$bb/bootable/recovery/kernel_module_loader.cpp"; then
+            echo "::error::kernel_module_loader.cpp lost Stage_Post_Decrypt_Modules; the post-decrypt path cannot be staged"
             fail=1
           fi
           if ! grep -q 'TW_LOAD_VENDOR_MODULES' "$bb/bootable/recovery/Android.mk"; then
@@ -580,17 +593,23 @@ jobs:
 
           # 9. The list in aera_astonc.mk and the list in BoardConfig.mk must
           #    agree. Two declarations of one truth drift silently otherwise,
-          #    and the aera_config.mk mapping overwrites BoardConfig.mk with
-          #    the AERA_* value, so this one is what the compiler finally sees.
-          aera_list=$(grep -oE '^AERA_LOAD_VENDOR_MODULES[[:space:]]*:?=[[:space:]]*"[^"]*"' "$am" | sed 's/.*"\(.*\)"/\1/' | tr ' ' '\n' | sort | tr '\n' ' ')
-          bc_list=$(grep -oE '^TW_LOAD_VENDOR_MODULES[[:space:]]*:?=[[:space:]]*"[^"]*"' "$bc" | sed 's/.*"\(.*\)"/\1/' | tr ' ' '\n' | sort | tr '\n' ' ')
+          #    and the aera_config.mk mapping (aera_config.mk:125) overwrites
+          #    BoardConfig.mk with the AERA_* value, so this one is what the
+          #    compiler finally sees. The pre-decrypt names must stay gone in
+          #    both files.
+          aera_list=$(grep -oE '^AERA_POST_DECRYPT_MODULES[[:space:]]*:?=[[:space:]]*"[^"]*"' "$am" | sed 's/.*"\(.*\)"/\1/' | tr ' ' '\n' | sort | tr '\n' ' ')
+          bc_list=$(grep -oE '^TW_POST_DECRYPT_MODULES[[:space:]]*:?=[[:space:]]*"[^"]*"' "$bc" | sed 's/.*"\(.*\)"/\1/' | tr ' ' '\n' | sort | tr '\n' ' ')
           if [ -z "$aera_list" ]; then
-            echo "::error::aera_astonc.mk does not declare AERA_LOAD_VENDOR_MODULES; the public interface has been dropped"
+            echo "::error::aera_astonc.mk does not declare AERA_POST_DECRYPT_MODULES; the public interface has been dropped"
             fail=1
           elif [ "$aera_list" != "$bc_list" ]; then
-            echo "::error::AERA_LOAD_VENDOR_MODULES and TW_LOAD_VENDOR_MODULES disagree"
+            echo "::error::AERA_POST_DECRYPT_MODULES and TW_POST_DECRYPT_MODULES disagree"
             echo "::error::  aera_astonc.mk : $aera_list"
             echo "::error::  BoardConfig.mk : $bc_list"
+            fail=1
+          fi
+          if grep -qE '^[[:space:]]*AERA_LOAD_VENDOR_MODULES(_EXCLUDE_GKI)?[[:space:]]*:?=' "$am"; then
+            echo "::error::aera_astonc.mk still assigns AERA_LOAD_VENDOR_MODULES*; the pre-decrypt loader broke decrypt on this device (run #34)"
             fail=1
           fi
 
@@ -680,9 +699,9 @@ jobs:
           #     on success. The pattern is anchored on the assignment so the
           #     documented non-settings (the vendor_boot/prebuilt/post-decrypt
           #     passes, mobile data) are not mistaken for the Wi-Fi switches.
-          echo "--- Wi-Fi switches (want all present) ---"
-          grep -nE '^[[:space:]]*(TW_LOAD_VENDOR_MODULES|TW_LOAD_VENDOR_MODULES_EXCLUDE_GKI|OF_ENABLE_WLAN)[[:space:]]*:?=' "$bc" || echo "  (none in BoardConfig.mk)"
-          grep -nE '^[[:space:]]*(AERA_LOAD_VENDOR_MODULES|AERA_LOAD_VENDOR_MODULES_EXCLUDE_GKI|AERA_ENABLE_WLAN)[[:space:]]*:?=' "$am" || echo "  (none in aera_astonc.mk)"
+          echo "--- Wi-Fi switches (post-decrypt loader: want TW_POST/AERA_POST + OF/AERA_ENABLE_WLAN, no TW_LOAD/AERA_LOAD) ---"
+          grep -nE '^[[:space:]]*(TW_LOAD_VENDOR_MODULES|TW_LOAD_VENDOR_MODULES_EXCLUDE_GKI|TW_POST_DECRYPT_MODULES|OF_ENABLE_WLAN)[[:space:]]*:?=' "$bc" || echo "  (none in BoardConfig.mk)"
+          grep -nE '^[[:space:]]*(AERA_LOAD_VENDOR_MODULES|AERA_LOAD_VENDOR_MODULES_EXCLUDE_GKI|AERA_POST_DECRYPT_MODULES|AERA_ENABLE_WLAN)[[:space:]]*:?=' "$am" || echo "  (none in aera_astonc.mk)"
           echo "--- module list agreement ---"
           printf '  aera: %s\n' "$aera_list"
           printf '  board: %s\n' "$bc_list"
@@ -953,6 +972,32 @@ jobs:
           fi
           echo "Terminal actions hand off with the graphics thread alive (pause loop)"
 
+          # astonc: the Wi-Fi modules load after decryption, never during
+          # fstab processing (run #34: the pre-decrypt loader unmounts
+          # /vendor and /vendor_dlkm, which breaks both decrypt and cnss2
+          # firmware resolution). Upstream stages the post-decrypt modules
+          # from inside Load_Vendor_Modules(), which is compiled out when
+          # TW_LOAD_VENDOR_MODULES is unset, so the stage-on-demand patch
+          # gives Load_Post_Decrypt_Modules() its own staging entry that
+          # mounts /vendor, /vendor_dlkm and persist first.
+          python3 device/oneplus/astonc/scripts/fix-post-decrypt-stage.py bootable/recovery
+
+          kl=bootable/recovery/kernel_module_loader.cpp
+          if ! grep -qF 'astonc: staging post-decrypt modules on demand' "$kl"; then
+            echo "::error::kernel_module_loader.cpp is missing the stage-on-demand marker; fix-post-decrypt-stage.py did not apply"
+            exit 1
+          fi
+          if ! grep -qF 'Mount_By_Path("/mnt/vendor/persist", false)' "$kl"; then
+            echo "::error::the stage-on-demand block does not mount persist; wlan/WCNSS_qcom_cfg.ini would be unresolvable"
+            exit 1
+          fi
+          n_stage=$(grep -cF 'Stage_Post_Decrypt_Modules();' "$kl")
+          if [ "$n_stage" -lt 3 ]; then
+            echo "::error::expected the upstream 2 Stage_Post_Decrypt_Modules() calls plus the new on-demand one, found $n_stage"
+            exit 1
+          fi
+          echo "Post-decrypt module staging is wired with /vendor, /vendor_dlkm and persist mounted"
+
       - name: Build recovery
         env:
           # Passed through env rather than interpolated into the script, so a
@@ -1152,6 +1197,12 @@ jobs:
           echo "--- wlan.cpp / supplicant path ---"
           check "wpa_supplicant"
           check "sys.aera.wlan.up"
+
+          echo "--- post-decrypt module loader (run #34 fix) ---"
+          check "Staging post-decrypt modules"
+          check "post.decrypt.modules"
+          check "astonc: staging post-decrypt modules on demand"
+          check "/tmp/post_decrypt_modules"
 
           if [ "$fail" -ne 0 ]; then
             echo "::error::the recovery binary was built without the kernel module loader or the Wi-Fi stack; the resulting image cannot bring up wlan0"

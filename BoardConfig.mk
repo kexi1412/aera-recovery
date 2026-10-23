@@ -194,56 +194,47 @@ AERA_RECOVERY_ADDITIONAL_RELINK_LIBRARY_FILES += \
 BOARD_VENDOR_SEPOLICY_DIRS += $(DEVICE_PATH)/sepolicy
 
 # ---------------------------------------------------------------------------
-# Kernel module loading (Wi-Fi / QCA6490)
+# Kernel module loading (Wi-Fi / QCA6490) -- post-decrypt ONLY
 # ---------------------------------------------------------------------------
-# These are set HERE as well as in aera_astonc.mk. The aera_config.mk mapping
-# from the public AERA_* namespace does fire, but it is an immediate assignment
-# that runs LAST (aera_astonc.mk is evaluated during product import, then
-# BoardConfig.mk, then aera_config.mk at config.mk:478-479), so it OVERWRITES
-# whatever this file sets. That is harmless only while the two agree, which is
-# why aera_astonc.mk carries the identical 9-module list and why the CI gate
-# compares the two.
+# Run #34 (2026-10-24, user-flashed) settled the question the Wi-Fi removal
+# (dc9122f) had left open: loading the QCA6490 stack during fstab processing
+# breaks this device, and it takes decryption down with it. The pre-decrypt
+# loader path (KernelModuleLoader::Load_Vendor_Modules, called from
+# partitionmanager.cpp:764) bind-mounts a tmpfs copy over the module
+# directory, copies the whole /vendor_dlkm module set into RAM (twice: once
+# through the /vendor/lib/modules symlink, once directly), and - critically -
+# unmounts /vendor, /vendor_dlkm and /system_dlkm when it finishes. After
+# that, keymint's lazy vendor-library loads fail (decrypt dies) and cnss2
+# cannot resolve kiwi/amss.bin through /vendor/firmware_mnt (wlan0 never
+# appears). The identical session decrypts fine with the loader call compiled
+# out - which is exactly the run #33 configuration the device had verified.
 #
-# This file is still the right place to set them, for two independent reasons:
-#   * Every Android.mk is parsed after config.mk has finished, so these values
-#     are unconditionally in scope for the loader gate at
-#     bootable/recovery/Android.mk:369
-#       ifneq ($(strip $(TW_LOAD_VENDOR_MODULES) $(TW_POST_DECRYPT_MODULES)),)
-#     and for the Wi-Fi gate at Android.mk:75 - immune to any future change in
-#     the ordering above.
-#   * The reference tree for this platform does the same thing -
-#     twrp_device_oplus_sm8550 BoardConfig.mk:237-238 sets
-#     TW_LOAD_VENDOR_MODULES and TW_LOAD_VENDOR_MODULES_EXCLUDE_GKI in
-#     BoardConfig.mk, with the same double quoting - so this is the established
-#     shape for the platform rather than a local invention.
+# TW_LOAD_VENDOR_MODULES is therefore deliberately NOT set: with it unset,
+# partitionmanager.cpp:764 compiles the fstab-parse-time loader call out and
+# the pre-decrypt boot path is the verified #33 one, byte for byte.
 #
-# BoardConfig.mk does not need to be careful about a readonly clash here:
-# board_config.mk:22-33 _board_strip_readonly_list lists only BOARD_* names, so
-# TW_LOAD_VENDOR_MODULES is not readonly and assigning it is legal.
+# The modules load after decryption instead. KernelModuleLoader::
+# Load_Post_Decrypt_Modules() runs from the Decrypt_Data() success path
+# (partitionmanager.cpp:2665), loads each requested module with finit_module
+# (no fork, no bind-mount, no tmpfs directory copies) in list order, and sets
+# the post.decrypt.modules property when done. scripts/fix-post-decrypt-stage.py
+# adds stage-on-demand to that function, because upstream stages from inside
+# Load_Vendor_Modules(), which is compiled out here; the patch also mounts
+# /vendor, /vendor_dlkm and /mnt/vendor/persist first - cnss2 resolves
+# amss.bin / bdwlan.elf through /vendor/firmware_mnt at probe time, and
+# qca_cld3_kiwi_v2 reads wlan/WCNSS_qcom_cfg.ini from persist.
 #
-# The quotes matter and must be kept: LOCAL_CFLAGS carries
-# -DTW_LOAD_VENDOR_MODULES="cfg80211.ko ..." as a single shell word, the
-# preprocessor defines it as a token sequence, and
-# twcommon.h:38 STRINGIFY(...) `#__VA_ARGS__` then stringifies the whole
-# sequence into one literal that TWFunc::split_string splits on spaces.
-# Without the quotes only the first module would survive.
+# Dependency order IS load order for finit_module (it does not resolve
+# modules.dep): cfg80211 and mac80211 first, then the CNSS service layer,
+# then the PCIe host driver, then the chip driver. cfg80211/mac80211 may
+# already be resident (the vendor_boot first-stage load list carries both);
+# the EEXIST case is tolerated explicitly by Load_Post_Decrypt_Modules().
 #
-# Module set: the QCA6490 (kiwi_v2) stack, ordered so that dependencies are
-# resolvable. cfg80211 and mac80211 first, then the CNSS service layer, then the
-# PCIe host driver and finally the chip driver. Re-verified against the
-# aera-16.0 upstream of 2026-10-23: Android.mk:369 still gates the loader on
-# TW_LOAD_VENDOR_MODULES, Android.mk:378 still tests EXCLUDE_GKI against the
-# literal "true", kernel_module_loader.cpp:314 still runs
-# /system/bin/beforemodules.sh, and aera_build.mk:876 still stages the
-# supplicant under OF_ENABLE_WLAN==1.
-TW_LOAD_VENDOR_MODULES := "cfg80211.ko mac80211.ko cnss_prealloc.ko cnss_utils.ko cnss_plat_ipc_qmi_svc.ko wlan_firmware_service.ko cnss_nl.ko cnss2.ko qca_cld3_kiwi_v2.ko"
-
-# Must be the literal string true, not 1: Android.mk:377 tests it with
-# ifeq ($(TW_LOAD_VENDOR_MODULES_EXCLUDE_GKI),true). It drops the
-# /lib/modules/<major>.<minor>-gki directory from the search list, because the
-# GKI modules for that path are the stock kernel's and must not shadow the
-# vendor copies that match this device's kernel.
-TW_LOAD_VENDOR_MODULES_EXCLUDE_GKI := true
+# The quotes matter and must be kept: the value reaches the compiler as
+# -DTW_POST_DECRYPT_MODULES="..." and twcommon.h EXPAND/STRINGIFY turns it
+# into one literal that TWFunc::split_string splits on spaces. Without the
+# quotes only the first module would survive.
+TW_POST_DECRYPT_MODULES := "cfg80211.ko mac80211.ko cnss_prealloc.ko cnss_utils.ko cnss_plat_ipc_qmi_svc.ko wlan_firmware_service.ko cnss_nl.ko cnss2.ko qca_cld3_kiwi_v2.ko"
 
 # Wi-Fi backend and UI. Must be the literal 1, not true: Android.mk:75 and
 # aera_build.mk:876 both compare it with ifeq against 1. With it set, wlan.cpp,
@@ -261,22 +252,16 @@ TW_LOAD_VENDOR_MODULES_EXCLUDE_GKI := true
 OF_ENABLE_WLAN := 1
 
 # Deliberately NOT set:
-#   TW_LOAD_VENDOR_BOOT_MODULES - compiles in the /lib/modules pass at
-#     kernel_module_loader.cpp:317. /lib/modules is the vendor_boot platform
-#     ramdisk and, per config/kernel-modules.json, holds 450 modules totalling
-#     67,991,336 B of which only cfg80211.ko and mac80211.ko are on the list
-#     above. Try_And_Load_Modules() copies the whole directory into /tmp
-#     (Copy_Modules_To_Tmpfs does not consult the requested list) and /tmp is
-#     tmpfs, so the pass would spend ~65 MiB of RAM to load two modules that
-#     recovery/root/system/bin/beforemodules.sh already insmods from the same
-#     directory at no copy cost.
-#   TW_LOAD_PREBUILT_MODULES_AT_FIRST - vendor_prebuilt modules are not shipped
-#     in this ramdisk; BOARD_RECOVERYIMAGE_PARTITION_SIZE is a 100 MiB cap and
-#     the .ko set is deliberately left out of it.
-#   TW_POST_DECRYPT_MODULES - the /system_dlkm and post-decrypt staging path is
-#     for FBE keys and this device stages nothing there. Setting it would also
-#     make Android.mk emit -DTW_POST_DECRYPT_MODULES, and
-#     Stage_Post_Decrypt_Modules() has no work to do.
+#   TW_LOAD_VENDOR_MODULES - see the run #34 evidence at the top of this
+#     block. The fstab-parse loader breaks both decrypt and Wi-Fi firmware
+#     resolution on this device; the post-decrypt path replaces it entirely.
+#   TW_LOAD_VENDOR_MODULES_EXCLUDE_GKI - only read by the pre-decrypt path,
+#     which is compiled out without TW_LOAD_VENDOR_MODULES.
+#   TW_LOAD_VENDOR_BOOT_MODULES - the /lib/modules pass; vendor_boot already
+#     loads its own list in first-stage, and Try_And_Load_Modules would copy
+#     all 450 modules (~68 MiB) into tmpfs to load the two already resident.
+#   TW_LOAD_PREBUILT_MODULES_AT_FIRST - no prebuilt vendor modules in this
+#     ramdisk; BOARD_RECOVERYIMAGE_PARTITION_SIZE is a 100 MiB cap.
 #   AERA_ENABLE_MOBILE_DATA - the upstream cellular provider is opt-in and
 #     needs a device-side RIL/QMI implementation that this tree does not ship;
 #     enabling the flag would only surface a "no provider" row.
