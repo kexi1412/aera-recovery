@@ -594,7 +594,38 @@ jobs:
             fail=1
           fi
 
-          # 10. The VINTF fix is what makes recovery decrypt, and it is
+          # 10. The super flash table must stay in agreement with the fstab.
+          #     The manual flash-image list is derived from the recovery
+          #     fstab's `logical` entries (TWFLAG_LOGICAL -> Is_Super ->
+          #     aera_flashimg), so a partition present in only one of the two
+          #     either silently disappears from the flash UI or is offered
+          #     without a mount. The verified set is the full 18-way PLK110
+          #     super group -- system system_ext product vendor odm
+          #     system_dlkm vendor_dlkm odm_dlkm plus the ten my_* vendor
+          #     partitions -- and both files must carry exactly it.
+          fstab="$dt/recovery/root/system/etc/recovery.fstab"
+          board_list=$(grep -E '^BOARD_QTI_DYNAMIC_PARTITIONS_PARTITION_LIST[[:space:]]*:?=' "$bc" \
+            | head -1 | sed 's/^.*:=//' | tr ' ' '\n' | grep -v '^$' | sort | tr '\n' ' ')
+          fstab_list=$(grep -vE '^[[:space:]]*#' "$fstab" | grep -w logical \
+            | awk '{print $1}' | sort | tr '\n' ' ')
+          n_board=$(printf '%s' "$board_list" | wc -w)
+          n_fstab=$(printf '%s' "$fstab_list" | wc -w)
+          if [ "$n_board" -ne 18 ]; then
+            echo "::error::BOARD_QTI_DYNAMIC_PARTITIONS_PARTITION_LIST must carry the 18-way super group, found $n_board: $board_list"
+            fail=1
+          fi
+          if [ "$n_fstab" -ne 18 ]; then
+            echo "::error::recovery.fstab must declare exactly 18 logical entries (the manual flash-image list derives from them), found $n_fstab: $fstab_list"
+            fail=1
+          fi
+          if [ "$board_list" != "$fstab_list" ]; then
+            echo "::error::the super partition list and the fstab logical entries disagree"
+            echo "::error::  BoardConfig.mk : $board_list"
+            echo "::error::  recovery.fstab  : $fstab_list"
+            fail=1
+          fi
+
+          # 11. The VINTF fix is what makes recovery decrypt, and it is
           #     invisible until a device boots with an encrypted /data:
           #     keystore2 aborts, the image still flashes and still boots.
           #     Assert the wiring here instead of discovering it after a
@@ -608,7 +639,7 @@ jobs:
             fail=1
           fi
 
-          # 11. Root Manager is opt-in upstream and this device has to opt in.
+          # 12. Root Manager is opt-in upstream and this device has to opt in.
           #
           #     Upstream 2782981 replaced AERA_ENABLE_KERNELSU_SUPPORT,
           #     AERA_ENABLE_KERNELSU_NEXT_SUPPORT and AERA_ENABLE_SUKISU_SUPPORT
@@ -645,7 +676,7 @@ jobs:
             fail=1
           fi
 
-          # 12. Report what is configured, so the values are in the log even
+          # 13. Report what is configured, so the values are in the log even
           #     on success. The pattern is anchored on the assignment so the
           #     documented non-settings (the vendor_boot/prebuilt/post-decrypt
           #     passes, mobile data) are not mistaken for the Wi-Fi switches.
