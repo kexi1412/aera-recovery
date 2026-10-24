@@ -34,26 +34,22 @@ MTP 构建进镜像：走 FunctionFS（`/dev/usb-ffs/mtp` + `sys.usb.config=mtp,
 "ADB & MTP disabled by maintainer" 并跳过 `Enable_MTP()`。**本树尚未在真机
 刷入验证 MTP**，刷入后需确认 `tw_mtp_enabled` 是否就绪。
 
-**WiFi 已恢复，且模块在解密之后加载（post-decrypt）。** `dc9122f` 移除时的
-归因方向正确但对象错误：run #34（2026-10-24）实测证明，fstab 解析期加载
-QCA6490 栈会**同时破坏解密与 WiFi**——`Load_Vendor_Modules()` 结束时卸载
-/vendor 与 /vendor_dlkm，keymint 惰性加载 vendor 库失败（解密死）、cnss2
-无法解析 amss.bin（wlan0 永不出现）。因此本树的形态是：
+**WiFi 已恢复，装载由 init 在 post-fs-data 完成（v4）。** 现场取证（2026-10-24
+adb 会话，见 docs/修复报告-2026-10-24.md §9）钉死了三件事：
 
-- `TW_LOAD_VENDOR_MODULES` **不设**：解密前的启动路径与已验证的 #33
-  逐字节一致；
-- `TW_POST_DECRYPT_MODULES`（BoardConfig.mk）与
-  `AERA_POST_DECRYPT_MODULES`（aera_astonc.mk，经 aera_config.mk:125 映射）
-  携带同一 9 模块列表，`Load_Post_Decrypt_Modules()` 在 Decrypt_Data()
-  成功后用 `finit_module` 按依赖序加载；`scripts/fix-post-decrypt-stage.py`
-  给它加按需 staging 并先挂载 /vendor、/vendor_dlkm、persist（固件与
-  校准的来源）；
-- `OF_ENABLE_WLAN` / `AERA_ENABLE_WLAN := 1`（字面量 1）照旧编译 WiFi
-  栈与 UI、staging wpa_supplicant/wpa_cli/dhcptool/aera-netfs；
-- `init.recovery.wifi.rc`（wpa_supplicant 服务 + `sys.aera.wlan.up` 处理器
-  + cnss2 fs_ready）、persist 挂载（fstab + post-fs + ueventd
-  firmware_directories 超集）与 `beforemodules.sh`（记录装载顺序，
-  post-decrypt 路径不调用）全部入树，CI 逐一断言。
+- **解密回归的真凶**是 recovery 模块加载器的运行期安全补丁覆盖块——它把
+  security_patch 从钉扎的 2026-09-01 resetprop 成 ROM 的 2026-10-01，
+  KeyMint 按操作评估补丁级，元数据加密密钥解包失败。装载器因此整体不编译
+  （`TW_LOAD_VENDOR_MODULES` / `TW_POST_DECRYPT_MODULES` 均不设），启动路径
+  与已验证的 #33 逐字节一致；
+- **电池的真凶**是 ADSP 未启动（rc 里的 insmod 路径指向不存在的
+  /vendor/lib/modules）：电量/充电 IC 的数据走 ADSP glink，没有它
+  `/sys/class/power_supply` 整个为空。v4 从 `/vendor_dlkm/lib/modules`
+  正确加载 ADSP 栈并在 gauge 一次性 init（t≈30s）之前启动它；
+- **WiFi 的真凶**是 cnss2 需要 modem 的 DMS QMI 服务提供出厂 MAC（缺失时
+  校准完成后放弃探测），且 fs_ready 必须在 USB gadget 配置**之前**写入
+  （晚写两次 panic 复现）。v4 在 post-fs-data 依次启动 ADSP、modem、
+  insmod QCA6490 栈并写 fs_ready——与 vendor 树自己的顺序一致。
 
 只开一半的表现仍是**卡死**而非功能缺失。上游 `aera_build.mk` 的 Wi-Fi 块
 打包 `aera-netfs`（原生 SMB/SFTP）与 `fusermount3`；`rclone_prebuilt` 已被

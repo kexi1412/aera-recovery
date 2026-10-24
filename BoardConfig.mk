@@ -194,57 +194,56 @@ AERA_RECOVERY_ADDITIONAL_RELINK_LIBRARY_FILES += \
 BOARD_VENDOR_SEPOLICY_DIRS += $(DEVICE_PATH)/sepolicy
 
 # ---------------------------------------------------------------------------
-# Kernel module loading (Wi-Fi / QCA6490) -- post-decrypt ONLY
+# Kernel module loading (Wi-Fi / QCA6490) -- owned by init, not by the loader
 # ---------------------------------------------------------------------------
 # Run #34 (2026-10-24, user-flashed) settled the question the Wi-Fi removal
-# (dc9122f) had left open: loading the QCA6490 stack during fstab processing
-# breaks this device, and it takes decryption down with it. The pre-decrypt
-# loader path (KernelModuleLoader::Load_Vendor_Modules, called from
-# partitionmanager.cpp:764) bind-mounts a tmpfs copy over the module
-# directory, copies the whole /vendor_dlkm module set into RAM (twice: once
-# through the /vendor/lib/modules symlink, once directly), and - critically -
-# unmounts /vendor, /vendor_dlkm and /system_dlkm when it finishes. After
-# that, keymint's lazy vendor-library loads fail (decrypt dies) and cnss2
-# cannot resolve kiwi/amss.bin through /vendor/firmware_mnt (wlan0 never
-# appears). The identical session decrypts fine with the loader call compiled
-# out - which is exactly the run #33 configuration the device had verified.
+# (dc9122f) had left open: loading the QCA6490 stack through the recovery
+# module loader breaks this device, and it takes decryption down with it.
+# The live adb session of 2026-10-24 pinned the exact mechanism, and it is
+# NOT the module insmods themselves:
 #
-# TW_LOAD_VENDOR_MODULES is therefore deliberately NOT set: with it unset,
-# partitionmanager.cpp:764 compiles the fstab-parse-time loader call out and
-# the pre-decrypt boot path is the verified #33 one, byte for byte.
+#   * Load_Vendor_Modules() carries a runtime security-patch override: it
+#     mounts /system_root and resetprops ro.build.version.security_patch
+#     with the ROM's current value (2026-10-01) AFTER vendor.keymint-qti
+#     started with the pinned identity (2026-09-01, VENDOR_SECURITY_PATCH
+#     below). KeyMint evaluates the OS patch level per operation, so the
+#     metadata-encryption key - wrapped under the September policy - no
+#     longer unwraps: "Unable to decrypt metadata encryption"
+#     (recovery.log:278) while keystore2 and keymint themselves run healthy.
+#     Run #33 never overrode anything and decrypts.
+#   * the loader also bind-mounts tmpfs copies over the module directories
+#     and unmounts /vendor, /vendor_dlkm and /system_dlkm when it finishes,
+#     which unmounts /vendor/firmware_mnt with them.
 #
-# The modules load after decryption instead. KernelModuleLoader::
-# Load_Post_Decrypt_Modules() runs from the Decrypt_Data() success path
-# (partitionmanager.cpp:2665), loads each requested module with finit_module
-# (no fork, no bind-mount, no tmpfs directory copies) in list order, and sets
-# the post.decrypt.modules property when done. scripts/fix-post-decrypt-stage.py
-# adds stage-on-demand to that function, because upstream stages from inside
-# Load_Vendor_Modules(), which is compiled out here; the patch also mounts
-# /vendor, /vendor_dlkm and /mnt/vendor/persist first - cnss2 resolves
-# amss.bin / bdwlan.elf through /vendor/firmware_mnt at probe time, and
-# qca_cld3_kiwi_v2 reads wlan/WCNSS_qcom_cfg.ini from persist.
+# TW_LOAD_VENDOR_MODULES and TW_POST_DECRYPT_MODULES are therefore BOTH unset:
+# partitionmanager.cpp:764 compiles the loader call out and
+# kernel_module_loader.cpp is not built at all (Android.mk:369 gates on the
+# two variables). The pre-decrypt boot path is the verified run #33 one,
+# byte for byte.
 #
-# Dependency order IS load order for finit_module (it does not resolve
-# modules.dep): cfg80211 and mac80211 first, then the CNSS service layer,
-# then the PCIe host driver, then the chip driver. cfg80211/mac80211 may
-# already be resident (the vendor_boot first-stage load list carries both);
-# the EEXIST case is tolerated explicitly by Load_Post_Decrypt_Modules().
+# The modules load through init instead - init.recovery.qcom.rc's
+# post-fs-data block insmods the ADSP stack (the charger/gauge ICs and the
+# WLAN firmware service ride the ADSP glink; without it the oplus_chg_v2
+# virtual gauge times out one-shot and /sys/class/power_supply stays empty -
+# the real cause of "battery capacity unavailable"), starts the modem
+# (cnss2 requires the DMS QMI service for the factory WLAN MAC and aborts
+# its probe without it: "Unable to get MAC from DMS after retries"), insmods
+# the QCA6490 stack and writes cnss2's fs_ready - all before the USB gadget
+# is configured, which is the vendor tree's own order and the only fs_ready
+# timing that survived live testing (two on-device panics happened when
+# fs_ready was written late, with adbd's gadget active). See that file for
+# the full evidence chain.
 #
-# The quotes matter and must be kept: the value reaches the compiler as
-# -DTW_POST_DECRYPT_MODULES="..." and twcommon.h EXPAND/STRINGIFY turns it
-# into one literal that TWFunc::split_string splits on spaces. Without the
-# quotes only the first module would survive.
-TW_POST_DECRYPT_MODULES := "cfg80211.ko mac80211.ko cnss_prealloc.ko cnss_utils.ko cnss_plat_ipc_qmi_svc.ko wlan_firmware_service.ko cnss_nl.ko cnss2.ko qca_cld3_kiwi_v2.ko"
-
-# Wi-Fi backend and UI. Must be the literal 1, not true: Android.mk:75 and
-# aera_build.mk:876 both compare it with ifeq against 1. With it set, wlan.cpp,
-# aera_wifi_dispatcher.cpp, aera_supplicant_link.cpp, the Network scenes and
-# aera_adbd.cpp are compiled, and wpa_supplicant, wpa_cli, dhcptool,
-# aera-netfs, the supplicant VINTF manifest and the wifi keystore/keymint NDK
-# libraries are staged into the ramdisk, which is what
-# init.recovery.wifi.rc:159 runs as a service. aera_build.mk also hard-errors
-# when external/wpa_supplicant_8 is absent; the AERA manifest provides it
-# (default.xml), as it provides external/libfuse for fusermount3.
+# What this file still owns is the Wi-Fi backend gate. Must be the literal 1,
+# not true: Android.mk:75 and aera_build.mk:876 both compare it with ifeq
+# against 1. With it set, wlan.cpp, aera_wifi_dispatcher.cpp,
+# aera_supplicant_link.cpp, the Network scenes and aera_adbd.cpp are
+# compiled, and wpa_supplicant, wpa_cli, dhcptool, aera-netfs, the supplicant
+# VINTF manifest and the wifi keystore/keymint NDK libraries are staged into
+# the ramdisk, which is what init.recovery.wifi.rc runs as a service.
+# aera_build.mk also hard-errors when external/wpa_supplicant_8 is absent;
+# the AERA manifest provides it (default.xml), as it provides
+# external/libfuse for fusermount3.
 #
 # Note upstream no longer builds rclone in this block: the native SMB/SFTP
 # storage replaced it (aera-netfs), so the Wi-Fi graph is far smaller than the
@@ -252,14 +251,11 @@ TW_POST_DECRYPT_MODULES := "cfg80211.ko mac80211.ko cnss_prealloc.ko cnss_utils.
 OF_ENABLE_WLAN := 1
 
 # Deliberately NOT set:
-#   TW_LOAD_VENDOR_MODULES - see the run #34 evidence at the top of this
-#     block. The fstab-parse loader breaks both decrypt and Wi-Fi firmware
-#     resolution on this device; the post-decrypt path replaces it entirely.
-#   TW_LOAD_VENDOR_MODULES_EXCLUDE_GKI - only read by the pre-decrypt path,
-#     which is compiled out without TW_LOAD_VENDOR_MODULES.
+#   TW_LOAD_VENDOR_MODULES / TW_POST_DECRYPT_MODULES - see above; the loader
+#     is compiled out entirely and init owns module loading.
+#   TW_LOAD_VENDOR_MODULES_EXCLUDE_GKI - only read by the loader path.
 #   TW_LOAD_VENDOR_BOOT_MODULES - the /lib/modules pass; vendor_boot already
-#     loads its own list in first-stage, and Try_And_Load_Modules would copy
-#     all 450 modules (~68 MiB) into tmpfs to load the two already resident.
+#     loads its own list in first-stage.
 #   TW_LOAD_PREBUILT_MODULES_AT_FIRST - no prebuilt vendor modules in this
 #     ramdisk; BOARD_RECOVERYIMAGE_PARTITION_SIZE is a 100 MiB cap.
 #   AERA_ENABLE_MOBILE_DATA - the upstream cellular provider is opt-in and

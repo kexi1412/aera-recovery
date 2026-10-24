@@ -47,48 +47,15 @@ AERA_ENABLE_FRP_ADDON := 1
 AERA_USE_LZ4_COMPRESSION := 1
 
 # Wi-Fi: QCA6490 attached over PCIe, driven by the kiwi_v2 host driver.
-# Modules load AFTER decryption - see BoardConfig.mk for the run #34 evidence
-# that the fstab-parse-time loader breaks decrypt on this device.
+# The module loading is owned by init.recovery.qcom.rc's post-fs-data block
+# (ADSP + modem + QCA stack + cnss2 fs_ready, all before the USB gadget).
+# BoardConfig.mk documents why the recovery module loader must stay out of
+# this device's boot path: its runtime security-patch override breaks
+# metadata-encryption unwrapping (decrypt) and its teardown unmounts
+# /vendor with the modem firmware mounted under it.
 #
-# AERA_POST_DECRYPT_MODULES is the public interface value; the aera_config.mk
-# mapping (aera_config.mk:125) translates it to TW_POST_DECRYPT_MODULES.
-# BoardConfig.mk sets that internal name too, with the identical list, and the
-# CI gate compares the two - the mapping runs after BoardConfig.mk and would
-# otherwise silently overwrite it.
+# What aera_astonc.mk still owns is the public Wi-Fi backend switch:
 #
-# The loader is MANDATORY for Wi-Fi. AERA_ENABLE_WLAN alone only compiles
-# wlan.cpp in; the driver stack still has to reach the kernel.
-#
-# Note the two ramdisks are different, which is easy to conflate:
-#
-#   recovery.img ramdisk      no /lib/modules at all.
-#   vendor_boot ramdisk       mounted at /lib/modules and DOES carry a module
-#                             tree (config/kernel-modules.json lists 450 files),
-#                             but the only Wi-Fi entries in it are cfg80211.ko
-#                             and mac80211.ko (modules.load.recovery:405-406).
-#
-# So cfg80211/mac80211 may already be resident (first-stage init loads the
-# vendor_boot list before recovery starts; the EEXIST case is tolerated),
-# while the CNSS service layer, the PCIe host driver and kiwi_v2 exist only
-# in /vendor_dlkm/lib/modules. Load_Post_Decrypt_Modules() finit_module()s
-# the list below in order - dependency order IS load order for finit_module,
-# it does not resolve modules.dep.
-#
-# qca_cld3_kiwi.ko is deliberately ABSENT: it refuses this silicon with "Driver
-# built for chip ver 0x1, enumerated ver 0x2, reject unsupported driver", while
-# qca_cld3_kiwi_v2.ko binds and owns cnss2 (live /proc/modules:
-# "cnss2 606208 1 kiwi_v2, Live").
-#
-# rmnet_wlan.ko is deliberately ABSENT: it fails with "Unknown symbol
-# rmnet_module_hook_register (err -2)" because rmnet_core.ko is not in this
-# module directory, and the rmnet data path is not needed for wlan0 to appear.
-#
-# Keep the quotes: the value reaches the compiler as
-# -DTW_POST_DECRYPT_MODULES="cfg80211.ko ..." and twcommon.h EXPAND/STRINGIFY
-# turns that into one literal which TWFunc::split_string splits on spaces.
-# Unquoted, only the first module would survive.
-AERA_POST_DECRYPT_MODULES := "cfg80211.ko mac80211.ko cnss_prealloc.ko cnss_utils.ko cnss_plat_ipc_qmi_svc.ko wlan_firmware_service.ko cnss_nl.ko cnss2.ko qca_cld3_kiwi_v2.ko"
-
 # Wi-Fi UI and backend. wlan.cpp / aera_wifi_dispatcher.cpp /
 # aera_supplicant_link.cpp / aera_adbd.cpp / the Network scenes and
 # nas/NasManager.cpp are only compiled when OF_ENABLE_WLAN == 1, and

@@ -25,10 +25,11 @@
 # ver 0x2, reject unsupported driver". /proc/modules on the live device shows
 #     cnss2 606208 1 kiwi_v2, Live
 #     cfg80211 1462272 2 kiwi_v2,mac80211, Live
-# confirming the v2 driver owns cnss2. The modules are requested through
-# AERA_LOAD_VENDOR_MODULES in aera_astonc.mk and loaded by
-# KernelModuleLoader::Load_Vendor_Modules() from /vendor_dlkm/lib/modules
-# (/vendor/lib/modules is a symlink to that directory on this device).
+# confirming the v2 driver owns cnss2. The modules are insmod'd by
+# init.recovery.qcom.rc at post-fs-data, from /vendor_dlkm/lib/modules (the
+# only module directory on this device; /vendor/lib/modules does not exist),
+# together with the ADSP stack and the modem start that cnss2's probe
+# requires. See that file for the full ordering and the device evidence.
 #
 # ---------------------------------------------------------------------------
 # cnss2 cold-boot calibration
@@ -44,12 +45,16 @@
 # (== /sys/devices/platform/soc/b0000000.qcom,cnss-qca-converged/fs_ready; the
 # two paths are the same kobject, verified on the running device).
 #
-# It is written here rather than at post-fs-data on purpose. fs_ready is created
-# by cnss2's probe, and cnss2 is loaded much later: Load_Vendor_Modules() runs
-# from PartitionManager's fstab parse, i.e. after post-fs-data has already
-# passed. Writing the attribute at post-fs-data would therefore hit a
-# non-existent path and silently do nothing. Doing it inside the
-# sys.aera.wlan.up=1 action guarantees cnss2 is resident.
+# It is written at post-fs-data in init.recovery.qcom.rc (v4, 2026-10-24).
+# cnss2 is insmod'd there too, from /vendor_dlkm/lib/modules, so the
+# attribute exists by the time the write runs. The original design wrote it
+# inside this action because the module loader ran much later, but two
+# on-device panics showed that writing fs_ready late - with adbd's USB
+# gadget active - kills the device, while the vendor tree's own order
+# (post-fs-data, before USB) has always been safe. The ADSP and the modem
+# must also be up before cnss2 probes: the gauge ICs and the WLAN firmware
+# service ride the ADSP glink, and the factory WLAN MAC comes from the
+# modem's DMS QMI service.
 #
 # ---------------------------------------------------------------------------
 # Where the firmware and config come from
@@ -171,18 +176,17 @@ service wpa_supplicant /system/bin/sh -c "until [ -e /sys/class/net/wlan0 ]; do 
 # reset to 0 is required, because that function only ever performs a plain set to
 # 1 and depends on a fresh 0 -> 1 transition to re-fire this action on a later
 # attempt.
+#
+# The driver half (ADSP, modem for the DMS MAC, the QCA6490 stack and the
+# fs_ready write) lives in init.recovery.qcom.rc's post-fs-data block; see the
+# note above. What remains here is the userspace half: the control sockets
+# and the supplicant.
 on property:sys.aera.wlan.up=1
     mkdir /tmp/recovery 0755 root system
     mkdir /tmp/recovery/sockets 0771 root system
 
-    # cnss2 cold-boot calibration. chmod is belt-and-braces: init runs as root
-    # and the attribute is already owner-writable (--w------- root root), but the
-    # vendor trees do the same and it costs one line.
-    #
-    # `wait` guards the load ordering: the attribute is created by cnss2's probe,
-    # and modules are loaded by the recovery binary rather than by init, so the
-    # node may lag this property write by a moment. init's wait retries until the
-    # path exists (it is a no-op when cnss2 registered early).
+    # Belt-and-braces: fs_ready was already written at post-fs-data; a second
+    # write is a no-op on the cnss2 store and costs one line.
     wait /sys/kernel/cnss 5
     chmod 0222 /sys/kernel/cnss/fs_ready
     write /sys/kernel/cnss/fs_ready 1

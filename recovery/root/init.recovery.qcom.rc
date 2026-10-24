@@ -66,16 +66,69 @@ on post-fs-data
     # the GUI, whose initial CPU path check is cached for the session.
     exec u:r:recovery:s0 root root -- /system/bin/sh /system/bin/astonc-cpu-sensor
 
+    # -------------------------------------------------------------------------
+    # ADSP + modem + QCA6490 bring-up, all before the USB gadget comes up.
+    #
+    # Live-proven on device (2026-10-24, adb + insmod session):
+    #   * Without the ADSP, oplus_chg_v2's virtual gauge times out forever
+    #     ("gauge_ic[oplus,virtual_gauge] init timeout", one-shot at first
+    #     IC probe) and /sys/class/power_supply stays empty - the charger and
+    #     gauge ICs report through the ADSP glink services. The gauge retry
+    #     loop does recover if the ADSP comes up in time, which is why this
+    #     runs here and not later.
+    #   * Without the modem, cnss2 aborts the WLAN probe after calibrating:
+    #     "Unable to get MAC from DMS after retries" - the factory WLAN MAC
+    #     comes from the modem's DMS QMI service, which only exists once the
+    #     modem subsystem is up.
+    #   * The ADSP modules live in /vendor_dlkm/lib/modules on this device
+    #     (392 files); /vendor/lib/modules does not exist, which is why the
+    #     old on-boot insmods silently no-oped.
+    #   * remoteproc loads adsp.mdt / modem.mdt through the kernel firmware
+    #     loader, which only searches /lib/firmware in recovery; link it at
+    #     the modem partition's image directory (mounted by on fs above).
+    #
+    # Writing /sys/kernel/cnss/fs_ready here - before the USB gadget is
+    # configured - follows the vendor tree's own init.target.rc order. The
+    # two on-device panics both happened when fs_ready was written late,
+    # with adbd's gadget active; the vendor order writes it at post-fs-data
+    # and has always been safe on this hardware.
+    # -------------------------------------------------------------------------
+    mkdir /lib 0755 root root
+    symlink /vendor/firmware_mnt/image /lib/firmware
+
+    insmod /vendor_dlkm/lib/modules/q6_pdr_dlkm.ko
+    insmod /vendor_dlkm/lib/modules/q6_notifier_dlkm.ko
+    insmod /vendor_dlkm/lib/modules/snd_event_dlkm.ko
+    insmod /vendor_dlkm/lib/modules/gpr_dlkm.ko
+    insmod /vendor_dlkm/lib/modules/spf_core_dlkm.ko
+    insmod /vendor_dlkm/lib/modules/adsp_loader_dlkm.ko
+    write /sys/kernel/boot_adsp/boot 1
+
+    # remoteproc3 is the MSS (modem) on this target (spss=0, adsp=1,
+    # cdsp=2, mss=3 by DT probe order; verified twice on device).
+    write /sys/class/remoteproc/remoteproc3/state start
+
+    # QCA6490 (kiwi_v2) stack, dependency order. cfg80211/mac80211 are
+    # already resident from the vendor_boot first-stage load; the CNSS
+    # service layer, the PCIe host driver and the chip driver are in
+    # /vendor_dlkm only. finit-order rules do not apply here (insmod is
+    # sequential), but the order below is the stock modules.load order.
+    insmod /vendor_dlkm/lib/modules/cnss_prealloc.ko
+    insmod /vendor_dlkm/lib/modules/cnss_utils.ko
+    insmod /vendor_dlkm/lib/modules/cnss_plat_ipc_qmi_svc.ko
+    insmod /vendor_dlkm/lib/modules/wlan_firmware_service.ko
+    insmod /vendor_dlkm/lib/modules/cnss_nl.ko
+    insmod /vendor_dlkm/lib/modules/cnss2.ko
+    insmod /vendor_dlkm/lib/modules/qca_cld3_kiwi_v2.ko
+
+    # cnss2 cold-boot calibration. `wait` guards the load ordering: the
+    # attribute is created by cnss2's probe, which runs off the insmod above.
+    wait /sys/kernel/cnss 5
+    chmod 0222 /sys/kernel/cnss/fs_ready
+    write /sys/kernel/cnss/fs_ready 1
+
 on boot
     start vendor.boot-default
-    # OEM recovery ADSP order; its other dependencies are in vendor_boot.
-    insmod /vendor/lib/modules/q6_pdr_dlkm.ko
-    insmod /vendor/lib/modules/q6_notifier_dlkm.ko
-    insmod /vendor/lib/modules/snd_event_dlkm.ko
-    insmod /vendor/lib/modules/gpr_dlkm.ko
-    insmod /vendor/lib/modules/spf_core_dlkm.ko
-    insmod /vendor/lib/modules/adsp_loader_dlkm.ko
-    write /sys/kernel/boot_adsp/boot 1
 
 on property:init.svc.fastbootd=running
     umount /vendor/firmware_mnt

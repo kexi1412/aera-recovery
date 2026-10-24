@@ -467,60 +467,66 @@ jobs:
           am="$dt/aera_astonc.mk"
           fail=0
 
-          # 1. The pre-decrypt loader gate must be GONE, and the post-decrypt
-          #    list present. Run #34 proved the fstab-parse-time loader breaks
-          #    decrypt on this device (Load_Vendor_Modules unmounts /vendor and
-          #    /vendor_dlkm when it finishes, which kills keymint's lazy
-          #    vendor-library loads and cnss2's firmware resolution), so
-          #    partitionmanager.cpp:764 must compile its call out and the
-          #    modules must load from the Decrypt_Data() success path instead
-          #    (partitionmanager.cpp:2665, under TW_POST_DECRYPT_MODULES).
+          # 1. The recovery module loader must stay out of the build entirely.
+          #    Run #34 proved its runtime security-patch override breaks the
+          #    metadata-encryption unwrap on this device (KeyMint evaluates
+          #    the OS patch level per operation; the loader resetprops it
+          #    from the pinned 2026-09-01 to the ROM's 2026-10-01 after
+          #    keymint started), and its teardown unmounts /vendor with the
+          #    modem firmware under it. With both gate variables unset,
+          #    Android.mk:369 compiles kernel_module_loader.cpp out.
           if grep -qE '^[[:space:]]*TW_LOAD_VENDOR_MODULES[[:space:]]*:?=' "$bc"; then
-            echo "::error::BoardConfig.mk still sets TW_LOAD_VENDOR_MODULES; the fstab-parse loader breaks decrypt on this device (run #34 evidence)"
+            echo "::error::BoardConfig.mk still sets TW_LOAD_VENDOR_MODULES; the loader breaks decrypt on this device (run #34 evidence)"
             fail=1
           fi
-          if ! grep -qE '^[[:space:]]*TW_POST_DECRYPT_MODULES[[:space:]]*:?=' "$bc"; then
-            echo "::error::BoardConfig.mk does not set TW_POST_DECRYPT_MODULES; the Wi-Fi modules would never load"
-            fail=1
-          fi
-
-          # 2. Quotes. The value is passed through -D and then stringified by
-          #    twcommon.h EXPAND/STRINGIFY, which needs one token sequence.
-          #    Unquoted, only the first module survives.
-          if ! grep -qE '^[[:space:]]*TW_POST_DECRYPT_MODULES[[:space:]]*:?=[[:space:]]*"' "$bc"; then
-            echo "::error::TW_POST_DECRYPT_MODULES is not quoted; only the first module would be loaded"
+          if grep -qE '^[[:space:]]*TW_POST_DECRYPT_MODULES[[:space:]]*:?=' "$bc"; then
+            echo "::error::BoardConfig.mk still sets TW_POST_DECRYPT_MODULES; module loading is owned by init.recovery.qcom.rc now"
             fail=1
           fi
 
-          # 3. Modules that carry the QCA6490 stack, and their ORDER: with
-          #    finit_module there is no modules.dep resolution, so dependency
-          #    order IS load order -- cfg80211 before mac80211 before cnss2
-          #    before kiwi_v2.
-          bc_mods=$(grep -oE '^TW_POST_DECRYPT_MODULES[[:space:]]*:?=[[:space:]]*"[^"]*"' "$bc" | sed 's/.*"\(.*\)"/\1/')
-          for m in cfg80211.ko mac80211.ko cnss2.ko qca_cld3_kiwi_v2.ko; do
-            if ! printf '%s\n' "$bc_mods" | tr ' ' '\n' | grep -qxF "$m"; then
-              echo "::error::TW_POST_DECRYPT_MODULES does not list $m"
+          # 2. The driver bring-up lives in init.recovery.qcom.rc's
+          #    post-fs-data block, with the ordering the live adb session
+          #    established: ADSP stack (charger/gauge ICs ride its glink),
+          #    modem start (cnss2 needs the DMS QMI service for the factory
+          #    WLAN MAC), QCA6490 stack, and fs_ready written before the USB
+          #    gadget is configured.
+          qr="$dt/recovery/root/init.recovery.qcom.rc"
+          for m in q6_pdr_dlkm.ko q6_notifier_dlkm.ko snd_event_dlkm.ko \
+                   gpr_dlkm.ko spf_core_dlkm.ko adsp_loader_dlkm.ko \
+                   cnss_prealloc.ko cnss_utils.ko cnss_plat_ipc_qmi_svc.ko \
+                   wlan_firmware_service.ko cnss_nl.ko cnss2.ko \
+                   qca_cld3_kiwi_v2.ko; do
+            if ! grep -qF "insmod /vendor_dlkm/lib/modules/$m" "$qr"; then
+              echo "::error::init.recovery.qcom.rc does not insmod /vendor_dlkm/lib/modules/$m (the only module directory on this device)"
               fail=1
             fi
           done
-          pos() { printf '%s\n' "$bc_mods" | tr ' ' '\n' | grep -nx "$1" | cut -d: -f1; }
-          p_cfg=$(pos cfg80211.ko); p_mac=$(pos mac80211.ko)
-          p_cnss=$(pos cnss2.ko); p_kiwi=$(pos qca_cld3_kiwi_v2.ko)
-          if [ -z "$p_cfg" ] || [ -z "$p_mac" ] || [ -z "$p_cnss" ] || [ -z "$p_kiwi" ] \
-             || [ "$p_cfg" -ge "$p_mac" ] || [ "$p_mac" -ge "$p_cnss" ] || [ "$p_cnss" -ge "$p_kiwi" ]; then
-            echo "::error::TW_POST_DECRYPT_MODULES is out of dependency order; finit_module needs cfg80211 < mac80211 < cnss2 < qca_cld3_kiwi_v2"
+          for need in 'symlink /vendor/firmware_mnt/image /lib/firmware' \
+                      'write /sys/kernel/boot_adsp/boot 1' \
+                      'write /sys/class/remoteproc/remoteproc3/state start' \
+                      'write /sys/kernel/cnss/fs_ready 1'; do
+            if ! grep -qF "$need" "$qr"; then
+              echo "::error::init.recovery.qcom.rc is missing: $need"
+              fail=1
+            fi
+          done
+          # The ADSP boot must precede the modem start and both must precede
+          # the fs_ready write inside the post-fs-data block.
+          adsp=$(grep -n 'write /sys/kernel/boot_adsp/boot 1' "$qr" | cut -d: -f1)
+          modem=$(grep -n 'write /sys/class/remoteproc/remoteproc3/state start' "$qr" | cut -d: -f1)
+          fsr=$(grep -n 'write /sys/kernel/cnss/fs_ready 1' "$qr" | cut -d: -f1)
+          if [ -z "$adsp" ] || [ -z "$modem" ] || [ -z "$fsr" ] || [ "$adsp" -ge "$modem" ] || [ "$modem" -ge "$fsr" ]; then
+            echo "::error::init.recovery.qcom.rc ordering wrong: boot_adsp ($adsp) < modem start ($modem) < fs_ready ($fsr) required"
             fail=1
           fi
 
-          # 4. The loader hook still ships (it documents the stock load order
-          #    and keeps the pre-decrypt path one commit away), and the
-          #    post-decrypt staging patch must be wired.
-          if [ ! -f "$dt/recovery/root/system/bin/beforemodules.sh" ]; then
-            echo "::error::recovery/root/system/bin/beforemodules.sh is missing"
+          # 3. The obsolete module-loader era artifacts must stay gone.
+          if [ -e "$dt/recovery/root/system/bin/beforemodules.sh" ]; then
+            echo "::error::recovery/root/system/bin/beforemodules.sh is back; the loader it serves is compiled out"
             fail=1
           fi
-          if [ ! -f "$dt/scripts/fix-post-decrypt-stage.py" ]; then
-            echo "::error::scripts/fix-post-decrypt-stage.py is missing; Load_Post_Decrypt_Modules would stage nothing and load no modules"
+          if [ -e "$dt/scripts/fix-post-decrypt-stage.py" ]; then
+            echo "::error::scripts/fix-post-decrypt-stage.py is back; module staging is owned by init now"
             fail=1
           fi
 
@@ -561,23 +567,11 @@ jobs:
             fail=1
           fi
 
-          # 8. Upstream must still contain the post-decrypt path, the hook and
-          #    the wlan.cpp contract this configuration relies on. If AERA
-          #    renames them, the configuration has to be re-derived rather
-          #    than silently doing nothing.
+          # 8. Upstream must still contain the gates and the wlan.cpp
+          #    contract this configuration relies on. If AERA renames them,
+          #    the configuration has to be re-derived rather than silently
+          #    doing nothing.
           bb="${{ steps.vol.outputs.work }}/aera"
-          if ! grep -q 'beforemodules.sh' "$bb/bootable/recovery/kernel_module_loader.cpp"; then
-            echo "::error::kernel_module_loader.cpp no longer calls /system/bin/beforemodules.sh; the ramdisk hook contract moved"
-            fail=1
-          fi
-          if ! grep -q 'KernelModuleLoader::Load_Post_Decrypt_Modules();' "$bb/bootable/recovery/partitionmanager.cpp"; then
-            echo "::error::partitionmanager.cpp no longer calls Load_Post_Decrypt_Modules; the post-decrypt load would never run"
-            fail=1
-          fi
-          if ! grep -q 'Stage_Post_Decrypt_Modules' "$bb/bootable/recovery/kernel_module_loader.cpp"; then
-            echo "::error::kernel_module_loader.cpp lost Stage_Post_Decrypt_Modules; the post-decrypt path cannot be staged"
-            fail=1
-          fi
           if ! grep -q 'TW_LOAD_VENDOR_MODULES' "$bb/bootable/recovery/Android.mk"; then
             echo "::error::bootable/recovery/Android.mk no longer gates on TW_LOAD_VENDOR_MODULES"
             fail=1
@@ -591,25 +585,10 @@ jobs:
             fail=1
           fi
 
-          # 9. The list in aera_astonc.mk and the list in BoardConfig.mk must
-          #    agree. Two declarations of one truth drift silently otherwise,
-          #    and the aera_config.mk mapping (aera_config.mk:125) overwrites
-          #    BoardConfig.mk with the AERA_* value, so this one is what the
-          #    compiler finally sees. The pre-decrypt names must stay gone in
-          #    both files.
-          aera_list=$(grep -oE '^AERA_POST_DECRYPT_MODULES[[:space:]]*:?=[[:space:]]*"[^"]*"' "$am" | sed 's/.*"\(.*\)"/\1/' | tr ' ' '\n' | sort | tr '\n' ' ')
-          bc_list=$(grep -oE '^TW_POST_DECRYPT_MODULES[[:space:]]*:?=[[:space:]]*"[^"]*"' "$bc" | sed 's/.*"\(.*\)"/\1/' | tr ' ' '\n' | sort | tr '\n' ' ')
-          if [ -z "$aera_list" ]; then
-            echo "::error::aera_astonc.mk does not declare AERA_POST_DECRYPT_MODULES; the public interface has been dropped"
-            fail=1
-          elif [ "$aera_list" != "$bc_list" ]; then
-            echo "::error::AERA_POST_DECRYPT_MODULES and TW_POST_DECRYPT_MODULES disagree"
-            echo "::error::  aera_astonc.mk : $aera_list"
-            echo "::error::  BoardConfig.mk : $bc_list"
-            fail=1
-          fi
-          if grep -qE '^[[:space:]]*AERA_LOAD_VENDOR_MODULES(_EXCLUDE_GKI)?[[:space:]]*:?=' "$am"; then
-            echo "::error::aera_astonc.mk still assigns AERA_LOAD_VENDOR_MODULES*; the pre-decrypt loader broke decrypt on this device (run #34)"
+          # 9. No module-list variable may reappear in either config file:
+          #    the loader they feed is compiled out and init owns loading.
+          if grep -qE '^[[:space:]]*(AERA_LOAD_VENDOR_MODULES|AERA_POST_DECRYPT_MODULES)[[:space:]]*:?=' "$am"; then
+            echo "::error::aera_astonc.mk still assigns a module-list variable (AERA_LOAD_VENDOR_MODULES / AERA_POST_DECRYPT_MODULES); module loading is owned by init.recovery.qcom.rc"
             fail=1
           fi
 
@@ -696,15 +675,12 @@ jobs:
           fi
 
           # 13. Report what is configured, so the values are in the log even
-          #     on success. The pattern is anchored on the assignment so the
-          #     documented non-settings (the vendor_boot/prebuilt/post-decrypt
-          #     passes, mobile data) are not mistaken for the Wi-Fi switches.
-          echo "--- Wi-Fi switches (post-decrypt loader: want TW_POST/AERA_POST + OF/AERA_ENABLE_WLAN, no TW_LOAD/AERA_LOAD) ---"
+          #     on success.
+          echo "--- Wi-Fi switches (want OF/AERA_ENABLE_WLAN only; no module lists) ---"
           grep -nE '^[[:space:]]*(TW_LOAD_VENDOR_MODULES|TW_LOAD_VENDOR_MODULES_EXCLUDE_GKI|TW_POST_DECRYPT_MODULES|OF_ENABLE_WLAN)[[:space:]]*:?=' "$bc" || echo "  (none in BoardConfig.mk)"
           grep -nE '^[[:space:]]*(AERA_LOAD_VENDOR_MODULES|AERA_LOAD_VENDOR_MODULES_EXCLUDE_GKI|AERA_POST_DECRYPT_MODULES|AERA_ENABLE_WLAN)[[:space:]]*:?=' "$am" || echo "  (none in aera_astonc.mk)"
-          echo "--- module list agreement ---"
-          printf '  aera: %s\n' "$aera_list"
-          printf '  board: %s\n' "$bc_list"
+          echo "--- init-owned driver bring-up (post-fs-data sequence) ---"
+          grep -nE 'insmod /vendor_dlkm|boot_adsp|remoteproc3|cnss/fs_ready|firmware_mnt/image /lib/firmware' "$dt/recovery/root/init.recovery.qcom.rc" || echo "  (none)"
           echo "--- vintf preparation hook ---"
           grep -n 'fix-recovery-vintf\.py' "$bc" || true
           echo "--- root manager switch (want AERA_ENABLE_ROOT_MANAGER := 1) ---"
@@ -972,31 +948,17 @@ jobs:
           fi
           echo "Terminal actions hand off with the graphics thread alive (pause loop)"
 
-          # astonc: the Wi-Fi modules load after decryption, never during
-          # fstab processing (run #34: the pre-decrypt loader unmounts
-          # /vendor and /vendor_dlkm, which breaks both decrypt and cnss2
-          # firmware resolution). Upstream stages the post-decrypt modules
-          # from inside Load_Vendor_Modules(), which is compiled out when
-          # TW_LOAD_VENDOR_MODULES is unset, so the stage-on-demand patch
-          # gives Load_Post_Decrypt_Modules() its own staging entry that
-          # mounts /vendor, /vendor_dlkm and persist first.
-          python3 device/oneplus/astonc/scripts/fix-post-decrypt-stage.py bootable/recovery
-
-          kl=bootable/recovery/kernel_module_loader.cpp
-          if ! grep -qF 'astonc: staging post-decrypt modules on demand' "$kl"; then
-            echo "::error::kernel_module_loader.cpp is missing the stage-on-demand marker; fix-post-decrypt-stage.py did not apply"
+          # Module loading is owned by init.recovery.qcom.rc's post-fs-data
+          # block (run #34 + the live adb session of 2026-10-24): the loader's
+          # security-patch override broke metadata-encryption unwrapping and
+          # its teardown unmounted /vendor. No build-time module patching
+          # happens here any more; assert that no stale loader artifacts
+          # came back instead.
+          if grep -qF 'astonc: staging post-decrypt modules on demand' bootable/recovery/kernel_module_loader.cpp 2>/dev/null; then
+            echo "::error::kernel_module_loader.cpp still carries the retired stage-on-demand patch; remove it (module loading is owned by init)"
             exit 1
           fi
-          if ! grep -qF 'Mount_By_Path("/mnt/vendor/persist", false)' "$kl"; then
-            echo "::error::the stage-on-demand block does not mount persist; wlan/WCNSS_qcom_cfg.ini would be unresolvable"
-            exit 1
-          fi
-          n_stage=$(grep -cF 'Stage_Post_Decrypt_Modules();' "$kl")
-          if [ "$n_stage" -lt 3 ]; then
-            echo "::error::expected the upstream 2 Stage_Post_Decrypt_Modules() calls plus the new on-demand one, found $n_stage"
-            exit 1
-          fi
-          echo "Post-decrypt module staging is wired with /vendor, /vendor_dlkm and persist mounted"
+          echo "Module loading owned by init.recovery.qcom.rc; no build-time module patching"
 
       - name: Build recovery
         env:
@@ -1127,22 +1089,16 @@ jobs:
           ls -l out/target/product/astonc/recovery.img 2>/dev/null | tee -a "$log" || true
           exit "$rc"
 
-      - name: Verify the recovery binary carries the module loader and the Wi-Fi stack
+      - name: Verify the Wi-Fi stack is compiled in and the loader is not
         if: always()
         run: |
           # The strongest available check, and the one that would have caught
-          # the original defect on its own: read the produced binary and look
-          # for the loader's own string literals. Configuration can be wrong in
-          # ways static checks miss (a later include overwriting the value, an
-          # ifdef elsewhere in the chain), and a build that emits a plausible
-          # recovery.img while silently omitting the module loader is exactly
-          # the failure this project shipped once already.
-          #
-          # The Wi-Fi removal era inverted this step to assert absence; the
-          # bring-up is back, so every string below is a REQUIRED presence
-          # again. A loader that is compiled in but left without the module
-          # list would fail the module-name checks; a compiled module list
-          # without the wlan backend would fail the sys.aera.wlan.up check.
+          # the original defect on its own: read the produced binary. With
+          # both loader gate variables unset, kernel_module_loader.cpp is not
+          # built at all, so its strings must be ABSENT - a present loader
+          # here would mean a module list leaked back into the config. The
+          # wlan backend must be present (OF_ENABLE_WLAN == 1), including the
+          # supplicant property contract init.recovery.wifi.rc consumes.
           bin="${{ steps.vol.outputs.work }}/aera/out/target/product/astonc/system/bin/recovery"
           if [ ! -f "$bin" ]; then
             bin="${{ steps.vol.outputs.work }}/aera/out/target/product/astonc/recovery/root/system/bin/recovery"
@@ -1155,10 +1111,8 @@ jobs:
           echo "verifying $bin ($(stat -c%s "$bin") bytes)"
 
           # Control: prove the strings scan itself works before trusting any
-          # result. An earlier draft used `^recovery$` and a threshold of 10,
-          # which the known-good reference binary fails (it has exactly one
-          # such line). Measured on a real recovery binary: 46159 strings
-          # lines, "recovery" 167x, "vendor" 56x, "AERA" 301x.
+          # result. Measured on a real recovery binary: 46159 strings lines,
+          # "recovery" 167x, "vendor" 56x, "AERA" 301x.
           if [ "$(head -c4 "$bin" | od -An -tx1 | tr -d ' \n')" != "7f454c46" ]; then
             echo "::error::recovery is not an ELF file"
             exit 1
@@ -1172,7 +1126,15 @@ jobs:
           fi
 
           fail=0
-          check() {
+          absent() {
+            if strings -a "$bin" | grep -qF -- "$1"; then
+              echo "::error::still in the recovery binary: $1"
+              fail=1
+            else
+              echo "  absent: $1"
+            fi
+          }
+          present() {
             if strings -a "$bin" | grep -qF -- "$1"; then
               echo "  found: $1"
             else
@@ -1181,34 +1143,23 @@ jobs:
             fi
           }
 
-          echo "--- recovery module loader ---"
-          check "Attempting to load modules"
-          check "Checking directory: "
-          check "Modules Loaded: "
-          check "modules.load.twrp"
-          check "/vendor/lib/modules"
-          check "/vendor_dlkm/lib/modules"
+          echo "--- module loader (must be compiled out) ---"
+          absent "Attempting to load modules"
+          absent "Checking directory: "
+          absent "Modules Loaded: "
+          absent "modules.load.twrp"
+          absent "Staging post-decrypt modules"
+          absent "astonc: staging post-decrypt modules on demand"
 
-          echo "--- requested module names ---"
-          for m in cfg80211.ko mac80211.ko cnss2.ko qca_cld3_kiwi_v2.ko cnss_plat_ipc_qmi_svc.ko; do
-            check "$m"
-          done
-
-          echo "--- wlan.cpp / supplicant path ---"
-          check "wpa_supplicant"
-          check "sys.aera.wlan.up"
-
-          echo "--- post-decrypt module loader (run #34 fix) ---"
-          check "Staging post-decrypt modules"
-          check "post.decrypt.modules"
-          check "astonc: staging post-decrypt modules on demand"
-          check "/tmp/post_decrypt_modules"
+          echo "--- wlan.cpp / supplicant path (must be present) ---"
+          present "wpa_supplicant"
+          present "sys.aera.wlan.up"
 
           if [ "$fail" -ne 0 ]; then
-            echo "::error::the recovery binary was built without the kernel module loader or the Wi-Fi stack; the resulting image cannot bring up wlan0"
+            echo "::error::the recovery binary's module-loader / Wi-Fi composition is wrong"
             exit 1
           fi
-          echo "recovery binary contains the module loader and the Wi-Fi stack"
+          echo "recovery binary: loader compiled out, Wi-Fi stack present"
 
       - name: Verify the VINTF decrypt fix reached the ramdisk
         if: always()
@@ -1317,7 +1268,7 @@ jobs:
           fi
           echo "the ramdisk carries the VINTF decrypt fix"
 
-      - name: Verify the ramdisk stages the Wi-Fi binaries and the module hook
+      - name: Verify the ramdisk stages the Wi-Fi init script and binaries
         if: always()
         run: |
           # The source-tree check in the configuration step reads the device
@@ -1327,11 +1278,6 @@ jobs:
           # AERA's relink_binaries copies whatever RECOVERY_BINARY_SOURCE_FILES
           # names by basename. A missing file here is a missing feature at the
           # device, whatever the sources said.
-          #
-          # beforemodules.sh is the one that matters most: kernel_module_loader.cpp
-          # treats a missing hook as a no-op, so a hook that silently failed to
-          # stage would leave the QCA stack to libmodprobe's dependency-file
-          # resolution alone -- the exact failure mode the hook exists to avoid.
           root="${{ steps.vol.outputs.work }}/aera/out/target/product/astonc/recovery/root"
           if [ ! -d "$root" ]; then
             echo "recovery ramdisk tree not found at $root; skipping"
@@ -1339,21 +1285,19 @@ jobs:
           fi
           fail=0
 
-          for f in system/bin/beforemodules.sh init.recovery.wifi.rc; do
-            if [ -f "$root/$f" ]; then
-              echo "  staged: $f ($(stat -c%s "$root/$f") bytes)"
-            else
-              echo "::error::$f did not reach the recovery ramdisk"
-              fail=1
-            fi
-          done
+          if [ -f "$root/init.recovery.wifi.rc" ]; then
+            echo "  staged: init.recovery.wifi.rc ($(stat -c%s "$root/init.recovery.wifi.rc") bytes)"
+          else
+            echo "::error::init.recovery.wifi.rc did not reach the recovery ramdisk"
+            fail=1
+          fi
 
           # A CRLF shebang makes a script unrunnable on the device, and the
           # failure is a bare "not found" that points nowhere near the cause.
-          for f in system/bin/beforemodules.sh init.recovery.wifi.rc; do
+          for f in init.recovery.wifi.rc init.recovery.qcom.rc; do
             [ -f "$root/$f" ] || continue
             if head -c2 "$root/$f" | grep -q $'\r' || grep -qU $'\r' "$root/$f"; then
-              echo "::error::$f contains CR characters; the shebang will not resolve on the device"
+              echo "::error::$f contains CR characters; init would misparse it"
               fail=1
             fi
           done
@@ -1379,6 +1323,13 @@ jobs:
             fail=1
           fi
 
+          # The loader-era hook must not reappear through AERA's own prebuilt
+          # install or relink_binaries.
+          if [ -e "$root/system/bin/beforemodules.sh" ]; then
+            echo "::error::beforemodules.sh reached the ramdisk although the loader it serves is compiled out"
+            fail=1
+          fi
+
           echo "--- what is in system/bin/ ---"
           ls "$root/system/bin/" 2>/dev/null || true
 
@@ -1386,7 +1337,7 @@ jobs:
             echo "::error::the Wi-Fi ramdisk artifacts are incomplete"
             exit 1
           fi
-          echo "the ramdisk stages the module hook, the Wi-Fi init script and the supplicant binaries"
+          echo "the ramdisk stages the Wi-Fi init script and the supplicant binaries"
 
       - name: Verify the Menu revert, the Root Manager payload and the fastboot closure
         if: always()
